@@ -32,6 +32,7 @@ const (
 	sysBusPciDrivers      = "/sys/bus/pci/drivers"
 	sysBusPciDriversProbe = "/sys/bus/pci/drivers_probe"
 	sysClassNet           = "/sys/class/net"
+	procKernelCmdLine     = "/proc/cmdline"
 	netClass              = 0x02
 	numVfsFile            = "sriov_numvfs"
 
@@ -40,6 +41,9 @@ const (
 	VendorMellanox        = "15b3"
 	DeviceBF2             = "a2d6"
 	DeviceBF3             = "a2dc"
+
+	KernelParamIntelIommu = "intel_iommu=on"
+	KernelParamIommuPt    = "iommu=pt"
 )
 
 var InitialState sriovnetworkv1.SriovNetworkNodeState
@@ -49,6 +53,23 @@ var pfPhysPortNameRe = regexp.MustCompile(`p\d+`)
 
 func init() {
 	ClusterType = os.Getenv("CLUSTER_TYPE")
+}
+
+// IsKernelCmdLineParamSet This checks if the kernel cmd line is set properly.
+func IsKernelCmdLineParamSet(param string, chroot bool) (bool, error) {
+	path := procKernelCmdLine
+	if !chroot {
+		path = "/host" + path
+	}
+	cmdLine, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("IsKernelCmdLineParamSet(): Error reading %s: %v", procKernelCmdLine, err)
+	}
+
+	if strings.Contains(string(cmdLine), param) {
+		return true, nil
+	}
+	return false, nil
 }
 
 func DiscoverSriovDevices(withUnsupported bool) ([]sriovnetworkv1.InterfaceExt, error) {
