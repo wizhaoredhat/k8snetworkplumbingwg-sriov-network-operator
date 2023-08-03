@@ -42,6 +42,7 @@ const (
 	DeviceBF2             = "a2d6"
 	DeviceBF3             = "a2dc"
 
+	KernelParamPciRealloc = "pci=realloc"
 	KernelParamIntelIommu = "intel_iommu=on"
 	KernelParamIommuPt    = "iommu=pt"
 )
