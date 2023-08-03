@@ -26,6 +26,7 @@ type GenericPlugin struct {
 	LastState            *sriovnetworkv1.SriovNetworkNodeState
 	LoadVfioDriver       uint
 	LoadVirtioVdpaDriver uint
+	DesiredKernelParams  map[string]uint
 	RunningOnHost        bool
 	HostManager          host.HostManagerInterface
 }
@@ -45,6 +46,7 @@ func NewGenericPlugin(runningOnHost bool) (plugin.VendorPlugin, error) {
 		SpecVersion:          "1.0",
 		LoadVfioDriver:       unloaded,
 		LoadVirtioVdpaDriver: unloaded,
+		DesiredKernelParams:  make(map[string]uint),
 		RunningOnHost:        runningOnHost,
 		HostManager:          host.NewHostManager(runningOnHost),
 	}, nil
@@ -69,7 +71,7 @@ func (p *GenericPlugin) OnNodeStateChange(new *sriovnetworkv1.SriovNetworkNodeSt
 	p.DesireState = new
 
 	needDrain = needDrainNode(new.Spec.Interfaces, new.Status.Interfaces)
-	needReboot = needRebootNode(new, &p.LoadVfioDriver, &p.LoadVirtioVdpaDriver)
+	needReboot = p.needRebootNode(new)
 
 	if needReboot {
 		needDrain = true
@@ -151,28 +153,28 @@ func needVirtioVdpaDriver(state *sriovnetworkv1.SriovNetworkNodeState) bool {
 	return false
 }
 
-func tryEnableIommuInKernelArgs() (bool, error) {
-	glog.Info("generic-plugin tryEnableIommuInKernelArgs()")
-	args := [2]string{"intel_iommu=on", "iommu=pt"}
+// trySetKernelParam Tries to add the kernel param via ostree or grubby.
+func trySetKernelParam(kparam string) (bool, error) {
+	glog.Info("generic-plugin trySetKernelParam()")
 	var stdout, stderr bytes.Buffer
-	cmd := exec.Command("/bin/sh", scriptsPath, args[0], args[1])
+	cmd := exec.Command("/bin/sh", scriptsPath, kparam)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
 		// if grubby is not there log and assume kernel args are set correctly.
 		if isCommandNotFound(err) {
-			glog.Error("generic-plugin tryEnableIommuInKernelArgs(): grubby command not found. Please ensure that kernel args intel_iommu=on iommu=pt are set")
+			glog.Errorf("generic-plugin trySetKernelParam(): grubby or ostree command not found. Please ensure that kernel param %s are set", kparam)
 			return false, nil
 		}
-		glog.Errorf("generic-plugin tryEnableIommuInKernelArgs(): fail to enable iommu %s: %v", args, err)
+		glog.Errorf("generic-plugin trySetKernelParam(): fail to enable kernel param %s: %v", kparam, err)
 		return false, err
 	}
 
 	i, err := strconv.Atoi(strings.TrimSpace(stdout.String()))
 	if err == nil {
 		if i > 0 {
-			glog.Infof("generic-plugin tryEnableIommuInKernelArgs(): need to reboot node")
+			glog.Infof("generic-plugin trySetKernelParam(): need to reboot node for kernel param %s", kparam)
 			return true, nil
 		}
 	}
@@ -186,6 +188,41 @@ func isCommandNotFound(err error) bool {
 		}
 	}
 	return false
+}
+
+// AddToDesiredKernelParams Should be called to queue a kernel param to be added to the node.
+func (p *GenericPlugin) AddToDesiredKernelParams(kparam string) {
+	if _, ok := p.DesiredKernelParams[kparam]; !ok {
+		glog.Infof("generic-plugin AddToDesiredKernelParams(): Adding %s to desired kernel params", kparam)
+		// element "uint" is a counter of number of attempts to set the kernel param
+		p.DesiredKernelParams[kparam] = 0
+	}
+}
+
+// SetAllDesiredKernelParams Should be called to set all the kernel parameters. Returns true if reboot of the node is needed.
+func (p *GenericPlugin) SetAllDesiredKernelParams() bool {
+	needReboot := false
+	for kparam, attempts := range p.DesiredKernelParams {
+		if !utils.IsKernelCmdLineParamSet(kparam, false) {
+			if attempts > 0 && attempts <= 4 {
+				glog.Errorf("generic-plugin SetAllDesiredKernelParams(): Fail to set kernel param %s after reboot with attempts %d", kparam, attempts)
+			} else if attempts > 4 {
+				// If we tried several times and was unsuccessful, we should give up.
+				continue
+			}
+			update, err := trySetKernelParam(kparam)
+			if err != nil {
+				glog.Errorf("generic-plugin SetAllDesiredKernelParams(): Fail to set kernel param %s: %v", kparam, err)
+			}
+			if update {
+				glog.V(2).Infof("generic-plugin SetAllDesiredKernelParams(): Need reboot for setting kernel param %s", kparam)
+			}
+			// Update the number of attempts we tried to set the kernel parameter.
+			p.DesiredKernelParams[kparam]++
+			needReboot = needReboot || update
+		}
+	}
+	return needReboot
 }
 
 func needDrainNode(desired sriovnetworkv1.Interfaces, current sriovnetworkv1.InterfaceExts) (needDrain bool) {
@@ -217,25 +254,19 @@ func needDrainNode(desired sriovnetworkv1.Interfaces, current sriovnetworkv1.Int
 	return
 }
 
-func needRebootNode(state *sriovnetworkv1.SriovNetworkNodeState, loadVfioDriver *uint, loadVirtioVdpaDriver *uint) (needReboot bool) {
+func (p *GenericPlugin) needRebootNode(state *sriovnetworkv1.SriovNetworkNodeState) (needReboot bool) {
 	needReboot = false
-	if *loadVfioDriver != loaded {
+	if p.LoadVfioDriver != loaded {
 		if needVfioDriver(state) {
-			*loadVfioDriver = loading
-			update, err := tryEnableIommuInKernelArgs()
-			if err != nil {
-				glog.Errorf("generic-plugin needRebootNode():fail to enable iommu in kernel args: %v", err)
-			}
-			if update {
-				glog.V(2).Infof("generic-plugin needRebootNode(): need reboot for enabling iommu kernel args")
-			}
-			needReboot = needReboot || update
+			p.LoadVfioDriver = loading
+			p.AddToDesiredKernelParams(utils.KernelParamIntelIommu)
+			p.AddToDesiredKernelParams(utils.KernelParamIommuPt)
 		}
 	}
 
-	if *loadVirtioVdpaDriver != loaded {
+	if p.LoadVirtioVdpaDriver != loaded {
 		if needVirtioVdpaDriver(state) {
-			*loadVirtioVdpaDriver = loading
+			p.LoadVirtioVdpaDriver = loading
 		}
 	}
 
@@ -246,6 +277,6 @@ func needRebootNode(state *sriovnetworkv1.SriovNetworkNodeState, loadVfioDriver 
 	if update {
 		glog.V(2).Infof("generic-plugin needRebootNode(): need reboot for updating switchdev device configuration")
 	}
-	needReboot = needReboot || update
+	needReboot = needReboot || update || p.SetAllDesiredKernelParams()
 	return
 }
