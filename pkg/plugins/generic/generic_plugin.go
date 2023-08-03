@@ -169,6 +169,9 @@ func (p *GenericPlugin) Apply() error {
 	}
 
 	if err := utils.SyncNodeState(p.DesireState, pfsToSkip); err != nil {
+		if strings.Contains(err.Error(), "cannot allocate memory") {
+			p.addToDesiredKernelParams(utils.KernelParamPciRealloc)
+		}
 		return err
 	}
 	p.LastState = &sriovnetworkv1.SriovNetworkNodeState{}
