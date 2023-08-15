@@ -32,7 +32,7 @@ const (
 	sysBusPciDrivers      = "/sys/bus/pci/drivers"
 	sysBusPciDriversProbe = "/sys/bus/pci/drivers_probe"
 	sysClassNet           = "/sys/class/net"
-	sysKernelCmdLine      = "/proc/cmdline"
+	procKernelCmdLine     = "/proc/cmdline"
 	netClass              = 0x02
 	numVfsFile            = "sriov_numvfs"
 
@@ -57,24 +57,20 @@ func init() {
 }
 
 // IsKernelCmdLineParamSet This checks if the kernel cmd line is set properly.
-func IsKernelCmdLineParamSet(param string, chroot bool) bool {
-	path := sysKernelCmdLine
+func IsKernelCmdLineParamSet(param string, chroot bool) (bool, error) {
+	path := procKernelCmdLine
 	if !chroot {
 		path = "/host" + path
 	}
 	cmdLine, err := os.ReadFile(path)
 	if err != nil {
-		glog.Warningf("IsKernelCmdLineParamSet(): Error reading %s, Please check the Kernel Params manually!", sysKernelCmdLine)
-		// Although intuitively we should report false here. However if we cannot reliably read the Kernel's cmd line params
-		// then it is unknown whether it was successfully set, and to avoid unnecessary reboots we should just post a warning
-		// and return true.
-		return true
+		return false, fmt.Errorf("IsKernelCmdLineParamSet(): Error reading %s: %v", procKernelCmdLine, err)
 	}
 
 	if strings.Contains(string(cmdLine), param) {
-		return true
+		return true, nil
 	}
-	return false
+	return false, nil
 }
 
 func DiscoverSriovDevices(withUnsupported bool) ([]sriovnetworkv1.InterfaceExt, error) {

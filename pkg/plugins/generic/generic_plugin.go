@@ -71,7 +71,7 @@ func (p *GenericPlugin) OnNodeStateChange(new *sriovnetworkv1.SriovNetworkNodeSt
 	p.DesireState = new
 
 	needDrain = needDrainNode(new.Spec.Interfaces, new.Status.Interfaces)
-	needReboot = p.needRebootNode(new)
+	needReboot, err = p.needRebootNode(new)
 
 	if needReboot {
 		needDrain = true
@@ -202,30 +202,34 @@ func (p *GenericPlugin) AddToDesiredKernelParams(kparam string) {
 	}
 }
 
-// SetAllDesiredKernelParams Should be called to set all the kernel parameters. Returns true if reboot of the node is needed.
-func (p *GenericPlugin) SetAllDesiredKernelParams() bool {
-	needReboot := false
+// SetAllDesiredKernelParams Should be called to set all the kernel parameters. Updates needReboot if reboot is needed.
+func (p *GenericPlugin) SetAllDesiredKernelParams(needReboot *bool) error {
 	for kparam, attempts := range p.DesiredKernelParams {
-		if !utils.IsKernelCmdLineParamSet(kparam, false) {
-			if attempts > 0 && attempts <= 4 {
-				glog.Errorf("generic-plugin SetAllDesiredKernelParams(): Fail to set kernel param %s after reboot with attempts %d", kparam, attempts)
-			} else if attempts > 4 {
-				// If we tried several times and was unsuccessful, we should give up.
-				continue
+		set, err := utils.IsKernelCmdLineParamSet(kparam, false)
+		if err != nil {
+			return err
+		}
+		if !set {
+			if attempts > 0 {
+				glog.Errorf("generic-plugin SetAllDesiredKernelParams(): failed to set kernel param %s with attempts %d", kparam, attempts)
 			}
+			// There is a case when we try to set the kernel parameter here, the daemon could decide to not reboot because
+			// the daemon encountered a potentially one-time error. However we always want to make sure that the kernel
+			// parameter is set once the daemon goes through node state sync again.
 			update, err := trySetKernelParam(kparam)
 			if err != nil {
-				glog.Errorf("generic-plugin SetAllDesiredKernelParams(): Fail to set kernel param %s: %v", kparam, err)
+				glog.Errorf("generic-plugin SetAllDesiredKernelParams(): fail to set kernel param %s: %v", kparam, err)
+				return err
 			}
 			if update {
-				glog.V(2).Infof("generic-plugin SetAllDesiredKernelParams(): Need reboot for setting kernel param %s", kparam)
+				glog.V(2).Infof("generic-plugin SetAllDesiredKernelParams(): need reboot for setting kernel param %s", kparam)
 			}
 			// Update the number of attempts we tried to set the kernel parameter.
 			p.DesiredKernelParams[kparam]++
-			needReboot = needReboot || update
+			*needReboot = *needReboot || update
 		}
 	}
-	return needReboot
+	return nil
 }
 
 func needDrainNode(desired sriovnetworkv1.Interfaces, current sriovnetworkv1.InterfaceExts) (needDrain bool) {
@@ -257,8 +261,8 @@ func needDrainNode(desired sriovnetworkv1.Interfaces, current sriovnetworkv1.Int
 	return
 }
 
-func (p *GenericPlugin) needRebootNode(state *sriovnetworkv1.SriovNetworkNodeState) (needReboot bool) {
-	needReboot = false
+func (p *GenericPlugin) needRebootNode(state *sriovnetworkv1.SriovNetworkNodeState) (bool, error) {
+	needReboot := false
 	if p.LoadVfioDriver != loaded {
 		if needVfioDriver(state) {
 			p.LoadVfioDriver = loading
@@ -273,13 +277,20 @@ func (p *GenericPlugin) needRebootNode(state *sriovnetworkv1.SriovNetworkNodeSta
 		}
 	}
 
+	err := p.SetAllDesiredKernelParams(&needReboot)
+	if err != nil {
+		glog.Errorf("generic-plugin needRebootNode(): failed to set the desired kernel parameters")
+		return false, err
+	}
+
 	update, err := utils.WriteSwitchdevConfFile(state)
 	if err != nil {
 		glog.Errorf("generic-plugin needRebootNode(): fail to write switchdev device config file")
+		return false, err
 	}
 	if update {
 		glog.V(2).Infof("generic-plugin needRebootNode(): need reboot for updating switchdev device configuration")
 	}
-	needReboot = needReboot || update || p.SetAllDesiredKernelParams()
-	return
+	needReboot = needReboot || update
+	return needReboot, nil
 }
