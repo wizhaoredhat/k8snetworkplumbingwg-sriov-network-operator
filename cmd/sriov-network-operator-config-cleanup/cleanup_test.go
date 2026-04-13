@@ -52,6 +52,7 @@ var _ = Describe("cleanup", Ordered, func() {
 		somePolicy.SetNamespace(testNamespace)
 		somePolicy.SetName("some-policy")
 		somePolicy.Spec = sriovnetworkv1.SriovNetworkNodePolicySpec{
+			ResourceName: "some_resource",
 			NumVfs:       5,
 			NodeSelector: map[string]string{"foo": "bar"},
 			NicSelector:  sriovnetworkv1.SriovNetworkNicSelector{},
