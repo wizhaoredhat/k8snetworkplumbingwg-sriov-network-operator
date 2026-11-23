@@ -163,6 +163,11 @@ func RedefineWithHugepages(pod *corev1.Pod, hugepagesName string, hugepagesAmoun
 
 // ExecCommand runs command in the pod and returns buffer output
 func ExecCommand(cs *testclient.ClientSet, pod *corev1.Pod, command ...string) (string, string, error) {
+	return ExecCommandWithContext(context.Background(), cs, pod, command...)
+}
+
+// ExecCommandWithContext runs command in the pod and returns buffer output.
+func ExecCommandWithContext(ctx context.Context, cs *testclient.ClientSet, pod *corev1.Pod, command ...string) (string, string, error) {
 	var buf, errbuf bytes.Buffer
 	req := cs.CoreV1Interface.RESTClient().
 		Post().
@@ -182,7 +187,7 @@ func ExecCommand(cs *testclient.ClientSet, pod *corev1.Pod, command ...string) (
 		return buf.String(), errbuf.String(), err
 	}
 
-	err = exec.StreamWithContext(context.Background(), remotecommand.StreamOptions{
+	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
 		Stdout: &buf,
 		Stderr: &errbuf,
 	})
