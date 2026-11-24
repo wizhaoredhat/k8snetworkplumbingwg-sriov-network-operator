@@ -1987,9 +1987,11 @@ func WaitForSRIOVStable() {
 	Eventually(func(g Gomega) {
 		stable, err := cluster.SriovStable(operatorNamespace, clients)
 		g.Expect(err).ToNot(HaveOccurred())
-		if !stable {
+		clusterReady, err := cluster.IsClusterStable(clients)
+		g.Expect(err).ToNot(HaveOccurred())
+		if !stable || !clusterReady {
 			stableSince = time.Time{}
-			g.Expect(stable).To(BeTrue(), "conditions not yet stable")
+			g.Expect(stable && clusterReady).To(BeTrue(), "SR-IOV conditions or cluster nodes not yet stable")
 			return
 		}
 
@@ -2005,12 +2007,6 @@ func WaitForSRIOVStable() {
 			k8sreporter.Events(clients, operatorNamespace)
 	})
 	fmt.Println("Sriov state is stable")
-
-	Eventually(func() bool {
-		isClusterReady, err := cluster.IsClusterStable(clients)
-		Expect(err).ToNot(HaveOccurred())
-		return isClusterReady
-	}, waitingTime, 1*time.Second).Should(BeTrue())
 }
 
 func findInterface(sriovInfos *cluster.EnabledNodes, node string) *sriovv1.InterfaceExt { // For the context of tests is better to use a Mellanox card
