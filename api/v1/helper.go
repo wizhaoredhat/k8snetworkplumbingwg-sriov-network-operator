@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -941,46 +940,6 @@ func GetOperatorConfig(ctx context.Context, reader client.Reader) (*SriovOperato
 		return nil, false, client.IgnoreNotFound(err)
 	}
 	return config, true, nil
-}
-
-// DRAResourceProvider returns a configuration with only DRA enabled.
-func DRAResourceProvider() ResourceProvider {
-	return ResourceProvider{DRA: true}
-}
-
-// DevicePluginResourceProvider returns a configuration with only the device plugin enabled.
-func DevicePluginResourceProvider() ResourceProvider {
-	return ResourceProvider{DevicePlugin: true}
-}
-
-// RequestedResourceProvider returns the provider selected by spec.featureGates.
-// An omitted DRA gate selects the device plugin.
-func (cr *SriovOperatorConfig) RequestedResourceProvider() ResourceProvider {
-	if cr.Spec.FeatureGates[consts.DynamicResourceAllocationFeatureGate] {
-		return DRAResourceProvider()
-	}
-	return DevicePluginResourceProvider()
-}
-
-// EffectiveFeatureGates uses the provider mode accepted by the operator rather
-// than a requested switch that may have been blocked. Missing status must be
-// initialized by the operator before any consumer acts on the DRA gate.
-func (cr *SriovOperatorConfig) EffectiveFeatureGates() (map[string]bool, error) {
-	switch cr.Status.ResourceProvider {
-	case DevicePluginResourceProvider(), DRAResourceProvider():
-	case ResourceProvider{DevicePlugin: true, DRA: true}:
-		return nil, fmt.Errorf("simultaneous device-plugin and DRA providers are not supported")
-	default:
-		return nil, fmt.Errorf("resource provider has not been initialized by the operator")
-	}
-	// Copy so the accepted DRA override leaves spec unchanged and callers get a
-	// reconcile-local snapshot independent of concurrent shared gate updates.
-	gates := maps.Clone(cr.Spec.FeatureGates)
-	if gates == nil {
-		gates = make(map[string]bool)
-	}
-	gates[consts.DynamicResourceAllocationFeatureGate] = cr.Status.ResourceProvider.DRA
-	return gates, nil
 }
 
 // GetConditions returns the conditions from the status.

@@ -301,7 +301,7 @@ var _ = Describe("Helper DRA", func() {
 			Expect(client.Get(ctx, k8sclient.ObjectKeyFromObject(extra), &corev1.ConfigMap{})).To(MatchError(ContainSubstring("not found")))
 		}, Entry("DRA", true), Entry("device plugin", false))
 
-		It("deletes DaemonSets before bindings, roles and service accounts, and protects cluster objects by UID and resource version", func() {
+		It("deletes DaemonSets first and protects provider objects by UID and resource version", func() {
 			objs, err := renderDRADriverObjs(config, testRenderManifests)
 			Expect(err).NotTo(HaveOccurred())
 			objects := make([]k8sclient.Object, 0, len(objs))
@@ -331,7 +331,8 @@ var _ = Describe("Helper DRA", func() {
 				},
 			}).Build()
 			Expect(cleanupProviderObjs(ctx, client, objs)).To(Succeed())
-			Expect(deletedKinds).To(Equal([]string{
+			Expect(deletedKinds[0]).To(Equal(consts.DaemonSet))
+			Expect(deletedKinds).To(ConsistOf([]string{
 				consts.DaemonSet, clusterRoleBindingResourceName, consts.RoleBinding, consts.RoleBinding,
 				clusterRoleResourceName, consts.Role, consts.Role, consts.ServiceAccount, deviceClassResourceName,
 			}))
@@ -380,8 +381,12 @@ var _ = Describe("Helper DRA", func() {
 			}}
 			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ds, roleBinding).WithInterceptorFuncs(interceptor.Funcs{
 				Delete: func(ctx context.Context, c k8sclient.WithWatch, obj k8sclient.Object, opts ...k8sclient.DeleteOption) error {
-					deletedKinds = append(deletedKinds, obj.GetObjectKind().GroupVersionKind().Kind)
-					return fmt.Errorf("deletion denied")
+					kind := obj.GetObjectKind().GroupVersionKind().Kind
+					deletedKinds = append(deletedKinds, kind)
+					if kind == consts.DaemonSet {
+						return fmt.Errorf("deletion denied")
+					}
+					return c.Delete(ctx, obj, opts...)
 				},
 			}).Build()
 			Expect(cleanupDRADriverObjs(ctx, client, config, testRenderManifests)).To(MatchError(ContainSubstring("deletion denied")))
@@ -571,86 +576,4 @@ var _ = Describe("Helper DRA", func() {
 		)
 	})
 
-	Context("daemonSetRolledOut", func() {
-		var (
-			ctx    context.Context
-			scheme *runtime.Scheme
-			nsSave string
-		)
-
-		BeforeEach(func() {
-			ctx = context.Background()
-			nsSave = vars.Namespace
-			vars.Namespace = testNamespace
-			DeferCleanup(func() { vars.Namespace = nsSave })
-			scheme = runtime.NewScheme()
-			utilruntime.Must(appsv1.AddToScheme(scheme))
-		})
-
-		It("waits when the DaemonSet is missing", func() {
-			client := fake.NewClientBuilder().WithScheme(scheme).Build()
-			ready, err := daemonSetRolledOut(ctx, client, consts.DRADriverDaemonSetName)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(ready).To(BeFalse())
-		})
-
-		It("waits when the DaemonSet is not rolled out", func() {
-			ds := &appsv1.DaemonSet{
-				ObjectMeta: metav1.ObjectMeta{Name: consts.DRADriverDaemonSetName, Namespace: testNamespace, Generation: 1},
-				Status:     appsv1.DaemonSetStatus{ObservedGeneration: 0, DesiredNumberScheduled: 2, NumberReady: 0},
-			}
-			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ds).Build()
-			ready, err := daemonSetRolledOut(ctx, client, consts.DRADriverDaemonSetName)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(ready).To(BeFalse())
-		})
-
-		It("succeeds when the DaemonSet has finished rolling out", func() {
-			ds := &appsv1.DaemonSet{
-				ObjectMeta: metav1.ObjectMeta{Name: consts.DRADriverDaemonSetName, Namespace: testNamespace, Generation: 1},
-				Status: appsv1.DaemonSetStatus{
-					ObservedGeneration:     1,
-					DesiredNumberScheduled: 2,
-					NumberReady:            2,
-					UpdatedNumberScheduled: 2,
-				},
-			}
-			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ds).Build()
-			ready, err := daemonSetRolledOut(ctx, client, consts.DRADriverDaemonSetName)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(ready).To(BeTrue())
-		})
-	})
-
-	Context("daemonSetExists", func() {
-		var (
-			ctx    context.Context
-			scheme *runtime.Scheme
-			nsSave string
-		)
-
-		BeforeEach(func() {
-			ctx = context.Background()
-			nsSave = vars.Namespace
-			vars.Namespace = testNamespace
-			DeferCleanup(func() { vars.Namespace = nsSave })
-			scheme = runtime.NewScheme()
-			utilruntime.Must(appsv1.AddToScheme(scheme))
-		})
-
-		It("returns false when the DaemonSet is absent", func() {
-			client := fake.NewClientBuilder().WithScheme(scheme).Build()
-			exists, err := daemonSetExists(ctx, client, devicePluginDaemonSetName)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(exists).To(BeFalse())
-		})
-
-		It("returns true when the DaemonSet is present", func() {
-			ds := &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Name: devicePluginDaemonSetName, Namespace: testNamespace}}
-			client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ds).Build()
-			exists, err := daemonSetExists(ctx, client, devicePluginDaemonSetName)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(exists).To(BeTrue())
-		})
-	})
 })

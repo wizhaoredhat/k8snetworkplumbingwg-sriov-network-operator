@@ -84,9 +84,8 @@ func (r *AggregateStatusReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 	states, statesErr := nodeStatesByName(ctx, r.Client)
 	var resourceValidator *sriovnetworkv1.PolicyResourceValidator
-	var resourceValidatorErr error
 	if found && config.DeletionTimestamp.IsZero() {
-		resourceValidator, resourceValidatorErr = config.NewPolicyResourceValidator()
+		resourceValidator = config.NewPolicyResourceValidator()
 	}
 
 	policyResults := make([]aggregatePolicyResult, 0, len(policies.Items))
@@ -94,9 +93,7 @@ func (r *AggregateStatusReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		policy := &policies.Items[i]
 		result := policyStatusFrom(policy, nodes, nodesErr, states, statesErr)
 		if policy.Namespace == vars.Namespace && policy.Name != constants.DefaultPolicyName && resourceIssues[policy.Name] == nil {
-			if resourceValidatorErr != nil {
-				resourceIssues[policy.Name] = resourceValidatorErr
-			} else if resourceValidator != nil {
+			if resourceValidator != nil {
 				// We read the total set of issues after every policy has been added so shared conflicts
 				// are attributed to policies encountered earlier in the list.
 				if err := resourceValidator.Add(policy); err != nil {
@@ -161,13 +158,12 @@ func (r *AggregateStatusReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // aggregateOperatorConfigChanged decides whether an OperatorConfig update should trigger recalculating policy and pool status.
 // It returns true when:
 // - Generation changes, usually because the config’s spec changed.
-// - Accepted resource provider changes, Status.ResourceProvider switches between device-plugin and DRA, or becomes initialized.
 // - Deletion starts, so DRA validation blockers can be cleared while finalizers are pending.
 // Other status-only updates, such as changes to Ready conditions, return false to avoid unnecessary reconciliations.
 func aggregateOperatorConfigChanged(e event.UpdateEvent) bool {
 	deletionStarted := e.ObjectOld != nil && e.ObjectNew != nil &&
 		e.ObjectOld.GetDeletionTimestamp().IsZero() && !e.ObjectNew.GetDeletionTimestamp().IsZero()
-	return predicate.GenerationChangedPredicate{}.Update(e) || operatorConfigProviderChanged(e.ObjectOld, e.ObjectNew) || deletionStarted
+	return predicate.GenerationChangedPredicate{}.Update(e) || deletionStarted
 }
 
 // aggregateKnown builds a Ready result with known node counts.

@@ -132,50 +132,32 @@ var _ = Describe("Start", func() {
 			vars.FeatureGate = featuregate.New()
 		})
 
-		DescribeTable("uses the accepted provider without changing the requested configuration", func(provider sriovnetworkv1.ResourceProvider) {
+		DescribeTable("uses the configured feature gate without changing the spec", func(draEnabled bool) {
 			config := &sriovnetworkv1.SriovOperatorConfig{
 				Spec: sriovnetworkv1.SriovOperatorConfigSpec{FeatureGates: map[string]bool{
-					consts.DynamicResourceAllocationFeatureGate: provider != sriovnetworkv1.DRAResourceProvider(),
+					consts.DynamicResourceAllocationFeatureGate: draEnabled,
 					consts.ParallelNicConfigFeatureGate:         true,
 				}},
-				Status: sriovnetworkv1.SriovOperatorConfigStatus{ResourceProvider: provider},
 			}
 			original := config.DeepCopy()
 			sharedGates := vars.FeatureGate
 			sharedGates.Set(map[string]bool{consts.MetricsExporterFeatureGate: true})
-			Expect(initFeatureGates(config)).To(Succeed())
-			Expect(vars.FeatureGate.IsEnabled(consts.DynamicResourceAllocationFeatureGate)).To(Equal(provider == sriovnetworkv1.DRAResourceProvider()))
+			initFeatureGates(config)
+			Expect(vars.FeatureGate.IsEnabled(consts.DynamicResourceAllocationFeatureGate)).To(Equal(draEnabled))
 			Expect(vars.FeatureGate.IsEnabled(consts.ParallelNicConfigFeatureGate)).To(BeTrue())
 			Expect(vars.FeatureGate.IsEnabled(consts.BlockDevicePluginUntilConfiguredFeatureGate)).To(BeTrue())
 			Expect(vars.FeatureGate.IsEnabled(consts.MetricsExporterFeatureGate)).To(BeFalse(), "removed overrides must reset to their defaults")
 			Expect(vars.FeatureGate).To(BeIdenticalTo(sharedGates))
 			Expect(config).To(Equal(original))
 		},
-			Entry("device plugin", sriovnetworkv1.DevicePluginResourceProvider()),
-			Entry("DRA", sriovnetworkv1.DRAResourceProvider()),
-		)
-
-		DescribeTable("rejects an uninitialized or unsupported provider without replacing the active gates", func(provider sriovnetworkv1.ResourceProvider, message string) {
-			saved := vars.FeatureGate
-			saved.Set(map[string]bool{consts.DynamicResourceAllocationFeatureGate: true})
-			config := &sriovnetworkv1.SriovOperatorConfig{
-				Status: sriovnetworkv1.SriovOperatorConfigStatus{ResourceProvider: provider},
-			}
-			Expect(initFeatureGates(config)).To(MatchError(message))
-			Expect(vars.FeatureGate).To(BeIdenticalTo(saved))
-			Expect(saved.IsEnabled(consts.DynamicResourceAllocationFeatureGate)).To(BeTrue())
-			Expect(saved.IsEnabled(consts.BlockDevicePluginUntilConfiguredFeatureGate)).To(BeTrue())
-		},
-			Entry("uninitialized", sriovnetworkv1.ResourceProvider{}, "resource provider has not been initialized by the operator"),
-			Entry("both providers", sriovnetworkv1.ResourceProvider{DevicePlugin: true, DRA: true}, "simultaneous device-plugin and DRA providers are not supported"),
+			Entry("device plugin", false),
+			Entry("DRA", true),
 		)
 
 		It("initializes defaults when no feature gates were requested", func() {
-			config := &sriovnetworkv1.SriovOperatorConfig{
-				Status: sriovnetworkv1.SriovOperatorConfigStatus{ResourceProvider: sriovnetworkv1.DRAResourceProvider()},
-			}
-			Expect(initFeatureGates(config)).To(Succeed())
-			Expect(vars.FeatureGate.IsEnabled(consts.DynamicResourceAllocationFeatureGate)).To(BeTrue())
+			config := &sriovnetworkv1.SriovOperatorConfig{}
+			initFeatureGates(config)
+			Expect(vars.FeatureGate.IsEnabled(consts.DynamicResourceAllocationFeatureGate)).To(BeFalse())
 			Expect(vars.FeatureGate.IsEnabled(consts.BlockDevicePluginUntilConfiguredFeatureGate)).To(BeTrue())
 			Expect(config.Spec.FeatureGates).To(BeNil())
 		})

@@ -118,15 +118,7 @@ func (r *SriovNetworkNodePolicyReconciler) Reconcile(ctx context.Context, req ct
 
 	// Use the config snapshot for this reconcile without overwriting the shared
 	// feature gate, which the config controller may already have updated.
-	gates, err := defaultOpConf.EffectiveFeatureGates()
-	if err != nil {
-		if defaultOpConf.Status.ResourceProvider == (sriovnetworkv1.ResourceProvider{}) {
-			return reconcile.Result{RequeueAfter: constants.DrainControllerRequeueTime}, nil
-		}
-		return reconcile.Result{}, fmt.Errorf("invalid accepted resource provider: %w", err)
-	}
-	acceptedDRA := gates[constants.DynamicResourceAllocationFeatureGate]
-	reqLogger.V(2).Info("effective feature gate overrides", "featureGates", gates)
+	draEnabled := defaultOpConf.Spec.FeatureGates[constants.DynamicResourceAllocationFeatureGate]
 
 	// Fetch the SriovNetworkNodePolicyList
 	policyList := &sriovnetworkv1.SriovNetworkNodePolicyList{}
@@ -140,17 +132,6 @@ func (r *SriovNetworkNodePolicyReconciler) Reconcile(ctx context.Context, req ct
 		}
 		// Error reading the object - requeue the request.
 		return reconcile.Result{}, err
-	}
-
-	// A provider change with no policies is still awaiting acceptance or rollout;
-	// keep that transition separate from a switch deliberately blocked by policies.
-	if defaultOpConf.Status.ResourceProvider != defaultOpConf.RequestedResourceProvider() {
-		if len(policyList.Items) == 0 {
-			return reconcile.Result{}, fmt.Errorf("requested resource provider has not been accepted; wait for status.resourceProvider to match the requested provider")
-		}
-		reqLogger.V(1).Info("requested resource provider is blocked by existing policies; using accepted provider",
-			"acceptedProvider", defaultOpConf.Status.ResourceProvider,
-			"requestedProvider", defaultOpConf.RequestedResourceProvider())
 	}
 
 	// Fetch the Nodes
@@ -172,7 +153,7 @@ func (r *SriovNetworkNodePolicyReconciler) Reconcile(ctx context.Context, req ct
 
 	// Reject invalid policies before changing NodeState or publishing DRA resources,
 	// but still prune owned policies for nodes outside the managed selector.
-	if acceptedDRA {
+	if draEnabled {
 		if _, err := sriovnetworkv1.PolicyResourceDrivers(policyList.Items); err != nil {
 			return reconcile.Result{}, r.syncSriovResourcePolicies(ctx, defaultOpConf, policyList, nodeList, false)
 		}
@@ -191,7 +172,7 @@ func (r *SriovNetworkNodePolicyReconciler) Reconcile(ctx context.Context, req ct
 	}
 
 	// Sync either device plugin ConfigMap or DRA resources (DeviceAttributes + SriovResourcePolicy) based on feature gate
-	if acceptedDRA {
+	if draEnabled {
 		reqLogger.Info("DRA feature gate enabled, syncing DeviceAttributes and SriovResourcePolicy CRs")
 		attributesErr := r.syncDeviceAttributes(ctx, defaultOpConf, policyList)
 		policyErr := r.syncSriovResourcePolicies(ctx, defaultOpConf, policyList, nodeList, attributesErr == nil)
@@ -238,7 +219,7 @@ func (r *SriovNetworkNodePolicyReconciler) SetupWithManager(mgr ctrl.Manager) er
 			qHandler(w)
 		},
 		UpdateFunc: func(c context.Context, e event.TypedUpdateEvent[client.Object], w workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-			if !operatorConfigProviderChanged(e.ObjectOld, e.ObjectNew) && e.ObjectOld.GetGeneration() == e.ObjectNew.GetGeneration() &&
+			if e.ObjectOld.GetGeneration() == e.ObjectNew.GetGeneration() &&
 				equality.Semantic.DeepEqual(e.ObjectOld.GetDeletionTimestamp(), e.ObjectNew.GetDeletionTimestamp()) {
 				return
 			}
@@ -308,13 +289,6 @@ func (r *SriovNetworkNodePolicyReconciler) SetupWithManager(mgr ctrl.Manager) er
 			ctrl_builder.WithPredicates(defaultConfigPredicate())).
 		WatchesRawSource(source.Channel(eventChan, &handler.EnqueueRequestForObject{})).
 		Complete(r)
-}
-
-// operatorConfigProviderChanged detects accepted provider changes on operator config updates.
-func operatorConfigProviderChanged(oldObj, newObj client.Object) bool {
-	oldConfig, oldOK := oldObj.(*sriovnetworkv1.SriovOperatorConfig)
-	newConfig, newOK := newObj.(*sriovnetworkv1.SriovOperatorConfig)
-	return oldOK && newOK && oldConfig.Status.ResourceProvider != newConfig.Status.ResourceProvider
 }
 
 func (r *SriovNetworkNodePolicyReconciler) syncDevicePluginConfigMap(ctx context.Context, dc *sriovnetworkv1.SriovOperatorConfig,

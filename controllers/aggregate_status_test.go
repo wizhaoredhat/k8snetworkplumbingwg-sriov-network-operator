@@ -125,7 +125,6 @@ var _ = Describe("Operator config update predicate", func() {
 	BeforeEach(func() {
 		old = testOperatorConfig()
 		old.Generation = 1
-		old.Status.ResourceProvider = sriovnetworkv1.DevicePluginResourceProvider()
 	})
 	for _, tc := range []struct {
 		name   string
@@ -134,9 +133,6 @@ var _ = Describe("Operator config update predicate", func() {
 	}{
 		{"unchanged", func(*sriovnetworkv1.SriovOperatorConfig) {}, false},
 		{"generation", func(c *sriovnetworkv1.SriovOperatorConfig) { c.Generation++ }, true},
-		{"accepted provider", func(c *sriovnetworkv1.SriovOperatorConfig) {
-			c.Status.ResourceProvider = sriovnetworkv1.DRAResourceProvider()
-		}, true},
 		{"deletion starts", func(c *sriovnetworkv1.SriovOperatorConfig) {
 			c.DeletionTimestamp = new(metav1.Now())
 		}, true},
@@ -221,8 +217,6 @@ var _ = Describe("Aggregate status", func() {
 		config := testOperatorConfig()
 		config.Spec.FeatureGates = map[string]bool{constants.DynamicResourceAllocationFeatureGate: true}
 		createAggregateObjects(config)
-		config.Status.ResourceProvider = sriovnetworkv1.DRAResourceProvider()
-		Expect(k8sClient.Status().Update(ctx, config)).To(Succeed())
 
 		policies := []*sriovnetworkv1.SriovNetworkNodePolicy{}
 		for _, item := range []struct{ name, resource string }{
@@ -284,19 +278,17 @@ var _ = Describe("Aggregate status", func() {
 					Expect(policy.Status.Conditions).To(HaveLen(1))
 				}
 			}
-			// Both normalized name collisions and allocation driver conflicts are
-			// DRA-only constraints and wait for the provider switch to be accepted.
-			config.Spec.FeatureGates = map[string]bool{constants.DynamicResourceAllocationFeatureGate: true}
+			// Normalized name collisions and allocation driver conflicts are
+			// DRA-only constraints that follow the configured feature gate.
+			config.Spec.FeatureGates = nil
 			Expect(k8sClient.Update(ctx, config)).To(Succeed())
-			config.Status.ResourceProvider = sriovnetworkv1.DevicePluginResourceProvider()
-			Expect(k8sClient.Status().Update(ctx, config)).To(Succeed())
 			reconcile()
 			for _, policy := range policies {
 				Expect(policy.Status.Conditions[0].Reason).To(Equal(sriovnetworkv1.ReasonApplyingConfiguration))
 				Expect(policy.Status.MatchedNodeCount).To(Equal(new(int32(1))))
 			}
-			config.Status.ResourceProvider = sriovnetworkv1.DRAResourceProvider()
-			Expect(k8sClient.Status().Update(ctx, config)).To(Succeed())
+			config.Spec.FeatureGates = map[string]bool{constants.DynamicResourceAllocationFeatureGate: true}
+			Expect(k8sClient.Update(ctx, config)).To(Succeed())
 			reconcile()
 			for _, policy := range policies[:3] {
 				condition := policy.Status.Conditions[0]
@@ -350,19 +342,21 @@ var _ = Describe("Aggregate status", func() {
 			Expect(good.Status.Conditions).To(HaveLen(1))
 			Expect(good.Status.Conditions[0].Reason).To(Equal(sriovnetworkv1.ReasonApplyingConfiguration))
 		}
-		config.Status.ResourceProvider = sriovnetworkv1.DevicePluginResourceProvider()
-		Expect(k8sClient.Status().Update(ctx, config)).To(Succeed())
+		config.Spec.FeatureGates = nil
+		Expect(k8sClient.Update(ctx, config)).To(Succeed())
 		check(sriovnetworkv1.ReasonApplyingConfiguration)
-		config.Status.ResourceProvider = sriovnetworkv1.DRAResourceProvider()
-		Expect(k8sClient.Status().Update(ctx, config)).To(Succeed())
+		config.Spec.FeatureGates = map[string]bool{constants.DynamicResourceAllocationFeatureGate: true}
+		Expect(k8sClient.Update(ctx, config)).To(Succeed())
 		for range 2 {
 			check(sriovnetworkv1.ReasonUnsupportedConfiguration)
 			Expect(bad.Status.Conditions[0].Status).To(Equal(metav1.ConditionFalse))
 			Expect(bad.Status.Conditions[0].Message).To(ContainSubstring(wantMessage))
 		}
-		// A blocked request to leave DRA must not suppress validation for the provider
-		// the operator has already accepted.
+		// Disabling DRA immediately clears DRA-only validation errors.
 		config.Spec.FeatureGates[constants.DynamicResourceAllocationFeatureGate] = false
+		Expect(k8sClient.Update(ctx, config)).To(Succeed())
+		check(sriovnetworkv1.ReasonApplyingConfiguration)
+		config.Spec.FeatureGates[constants.DynamicResourceAllocationFeatureGate] = true
 		Expect(k8sClient.Update(ctx, config)).To(Succeed())
 		check(sriovnetworkv1.ReasonUnsupportedConfiguration)
 		bad.Spec.NicSelector = sriovnetworkv1.SriovNetworkNicSelector{PfNames: []string{"ens1f0"}}

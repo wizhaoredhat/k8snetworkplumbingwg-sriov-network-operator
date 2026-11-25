@@ -58,7 +58,6 @@ func TestInvalidDRAPoliciesPruneUnmanagedNodes(t *testing.T) {
 					FeatureGates:             map[string]bool{consts.DynamicResourceAllocationFeatureGate: true},
 					ConfigDaemonNodeSelector: map[string]string{"managed": "true"},
 				},
-				Status: sriovnetworkv1.SriovOperatorConfigStatus{ResourceProvider: sriovnetworkv1.DRAResourceProvider()},
 			}
 			node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "managed-node", Labels: map[string]string{"managed": "true"}}}
 			outside := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "outside-node"}}
@@ -795,9 +794,7 @@ var _ = It("retries policy publication after an attribute write failure", func()
 		Name: consts.DefaultConfigName, Namespace: vars.Namespace, UID: "operator-owner",
 	}, Spec: sriovnetworkv1.SriovOperatorConfigSpec{FeatureGates: map[string]bool{
 		consts.DynamicResourceAllocationFeatureGate: true,
-	}}, Status: sriovnetworkv1.SriovOperatorConfigStatus{
-		ResourceProvider: sriovnetworkv1.DRAResourceProvider(),
-	}}
+	}}}
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
 		Name: "worker-0", Labels: map[string]string{
 			corev1.LabelHostname: "worker-0", "node-role.kubernetes.io/worker": "", "kubernetes.io/os": "linux",
@@ -2081,7 +2078,6 @@ var _ = It("cleans DRA objects using the config without changing shared feature 
 
 	dc := &sriovnetworkv1.SriovOperatorConfig{
 		ObjectMeta: metav1.ObjectMeta{Name: consts.DefaultConfigName, Namespace: testNamespace},
-		Status:     sriovnetworkv1.SriovOperatorConfigStatus{ResourceProvider: sriovnetworkv1.DevicePluginResourceProvider()},
 		Spec: sriovnetworkv1.SriovOperatorConfigSpec{
 			FeatureGates: map[string]bool{consts.DynamicResourceAllocationFeatureGate: false},
 		},
@@ -2137,8 +2133,8 @@ var _ = It("uses one config snapshot throughout policy reconciliation", func() {
 	previousGate := vars.FeatureGate
 	DeferCleanup(func() { vars.FeatureGate = previousGate })
 
-	for _, acceptedDRA := range []bool{false, true} {
-		By(fmt.Sprintf("acceptedDRA=%t", acceptedDRA), func() {
+	for _, draEnabled := range []bool{false, true} {
+		By(fmt.Sprintf("draEnabled=%t", draEnabled), func() {
 			ctx := context.Background()
 			scheme := runtime.NewScheme()
 			for _, add := range []func(*runtime.Scheme) error{sriovnetworkv1.AddToScheme, sriovdrav1alpha1.AddToScheme, corev1.AddToScheme, resourceapi.AddToScheme} {
@@ -2148,14 +2144,10 @@ var _ = It("uses one config snapshot throughout policy reconciliation", func() {
 				ObjectMeta: metav1.ObjectMeta{Name: consts.DefaultConfigName, Namespace: vars.Namespace, UID: "operator-owner"},
 				Spec: sriovnetworkv1.SriovOperatorConfigSpec{
 					FeatureGates: map[string]bool{
-						consts.DynamicResourceAllocationFeatureGate: acceptedDRA,
-						consts.ManageSoftwareBridgesFeatureGate:     acceptedDRA,
+						consts.DynamicResourceAllocationFeatureGate: draEnabled,
+						consts.ManageSoftwareBridgesFeatureGate:     draEnabled,
 					},
 				},
-				Status: sriovnetworkv1.SriovOperatorConfigStatus{ResourceProvider: sriovnetworkv1.DevicePluginResourceProvider()},
-			}
-			if acceptedDRA {
-				config.Status.ResourceProvider = sriovnetworkv1.DRAResourceProvider()
 			}
 			policy := &sriovnetworkv1.SriovNetworkNodePolicy{
 				ObjectMeta: metav1.ObjectMeta{Name: "policy", Namespace: vars.Namespace},
@@ -2184,10 +2176,10 @@ var _ = It("uses one config snapshot throughout policy reconciliation", func() {
 					}
 					if _, ok := list.(*sriovnetworkv1.SriovNetworkNodePolicyList); ok {
 						// Simulate another controller updating the shared gate after
-						// this reconcile has accepted its provider and read policies.
+						// this reconcile has read its config snapshot and policies.
 						fg.Set(map[string]bool{
-							consts.DynamicResourceAllocationFeatureGate: !acceptedDRA,
-							consts.ManageSoftwareBridgesFeatureGate:     !acceptedDRA,
+							consts.DynamicResourceAllocationFeatureGate: !draEnabled,
+							consts.ManageSoftwareBridgesFeatureGate:     !draEnabled,
 						})
 						gateChanged = true
 					}
@@ -2203,22 +2195,22 @@ var _ = It("uses one config snapshot throughout policy reconciliation", func() {
 			Expect(cl.Get(ctx, k8sclient.ObjectKeyFromObject(state), state)).To(Succeed())
 			{
 				gotBridges := len(state.Spec.Bridges.OVS) > 0
-				Expect(gotBridges).To(Equal(acceptedDRA), "bridges rendered = %t, want %t from config snapshot", gotBridges, acceptedDRA)
+				Expect(gotBridges).To(Equal(draEnabled), "bridges rendered = %t, want %t from config snapshot", gotBridges, draEnabled)
 			}
 			attrs := &sriovdrav1alpha1.DeviceAttributesList{}
 			Expect(cl.List(ctx, attrs)).To(Succeed())
 			{
 				gotDRA := len(attrs.Items) > 0
-				Expect(gotDRA).To(Equal(acceptedDRA), "DRA resources present = %t, want %t", gotDRA, acceptedDRA)
+				Expect(gotDRA).To(Equal(draEnabled), "DRA resources present = %t, want %t", gotDRA, draEnabled)
 			}
 			err := cl.Get(ctx, types.NamespacedName{Namespace: vars.Namespace, Name: consts.ConfigMapName}, &corev1.ConfigMap{})
-			Expect(acceptedDRA && !errors.IsNotFound(err)).To(BeFalse(), "device-plugin ConfigMap lookup = %v, acceptedDRA = %t", err, acceptedDRA)
-			Expect(!acceptedDRA && err != nil).To(BeFalse(), "device-plugin ConfigMap lookup = %v, acceptedDRA = %t", err, acceptedDRA)
+			Expect(draEnabled && !errors.IsNotFound(err)).To(BeFalse(), "device-plugin ConfigMap lookup = %v, draEnabled = %t", err, draEnabled)
+			Expect(!draEnabled && err != nil).To(BeFalse(), "device-plugin ConfigMap lookup = %v, draEnabled = %t", err, draEnabled)
 		})
 	}
 })
 
-var _ = It("reconciles policies with the accepted provider during a blocked switch", func() {
+var _ = It("reconciles policies from the feature gate without waiting for provider deployment", func() {
 	oldNamespace, oldPrefix := vars.Namespace, vars.ResourcePrefix
 	vars.Namespace, vars.ResourcePrefix = testNamespace, "openshift.io"
 	DeferCleanup(func() { vars.Namespace, vars.ResourcePrefix = oldNamespace, oldPrefix })
@@ -2233,7 +2225,6 @@ var _ = It("reconciles policies with the accepted provider during a blocked swit
 		Spec: sriovnetworkv1.SriovOperatorConfigSpec{FeatureGates: map[string]bool{
 			consts.DynamicResourceAllocationFeatureGate: true,
 		}},
-		Status: sriovnetworkv1.SriovOperatorConfigStatus{ResourceProvider: sriovnetworkv1.DevicePluginResourceProvider()},
 	}
 	policy := &sriovnetworkv1.SriovNetworkNodePolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "policy", Namespace: vars.Namespace},
@@ -2260,18 +2251,18 @@ var _ = It("reconciles policies with the accepted provider during a blocked swit
 
 	gotState := &sriovnetworkv1.SriovNetworkNodeState{}
 	Expect(cl.Get(ctx, k8sclient.ObjectKeyFromObject(state), gotState)).To(Succeed())
-	Expect(gotState.Spec.Interfaces).To(HaveLen(1), "NodeState was not reconciled by the accepted provider: %+v", gotState.Spec.Interfaces)
-	Expect(gotState.Spec.Interfaces[0].NumVfs).To(BeNumerically("==", 2), "NodeState was not reconciled by the accepted provider: %+v", gotState.Spec.Interfaces)
+	Expect(gotState.Spec.Interfaces).To(HaveLen(1), "NodeState was not reconciled by the configured provider: %+v", gotState.Spec.Interfaces)
+	Expect(gotState.Spec.Interfaces[0].NumVfs).To(BeNumerically("==", 2), "NodeState was not reconciled by the configured provider: %+v", gotState.Spec.Interfaces)
 	{
 		err := cl.Get(ctx, types.NamespacedName{Namespace: vars.Namespace, Name: consts.ConfigMapName}, &corev1.ConfigMap{})
-		Expect(err).NotTo(HaveOccurred(), "expected device-plugin ConfigMap: %v", err)
+		Expect(errors.IsNotFound(err)).To(BeTrue(), "DRA must not create a device-plugin ConfigMap: %v", err)
 	}
 	attrs := &sriovdrav1alpha1.DeviceAttributesList{}
 	Expect(cl.List(ctx, attrs)).To(Succeed())
-	Expect(attrs.Items).To(HaveLen(0), "requested DRA provider resources were deployed: %+v", attrs.Items)
+	Expect(attrs.Items).To(HaveLen(1), "DRA resources should be generated without a provider DaemonSet: %+v", attrs.Items)
 	policies := &sriovdrav1alpha1.SriovResourcePolicyList{}
 	Expect(cl.List(ctx, policies)).To(Succeed())
-	Expect(policies.Items).To(HaveLen(0), "requested DRA provider resources were deployed: %+v", policies.Items)
+	Expect(policies.Items).To(BeEmpty(), "VF publication still waits for the node configuration to be applied")
 })
 
 var _ = It("repairs managed DRA ownership and preserves foreign objects", func() {
@@ -2375,7 +2366,7 @@ var _ = It("rejects unsafe policy configuration before any writes", func() {
 			for _, add := range []func(*runtime.Scheme) error{sriovnetworkv1.AddToScheme, corev1.AddToScheme, resourceapi.AddToScheme, sriovdrav1alpha1.AddToScheme} {
 				Expect(add(scheme)).To(Succeed())
 			}
-			config := &sriovnetworkv1.SriovOperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: consts.DefaultConfigName, Namespace: vars.Namespace}, Spec: sriovnetworkv1.SriovOperatorConfigSpec{FeatureGates: map[string]bool{consts.DynamicResourceAllocationFeatureGate: true}}, Status: sriovnetworkv1.SriovOperatorConfigStatus{ResourceProvider: sriovnetworkv1.DRAResourceProvider()}}
+			config := &sriovnetworkv1.SriovOperatorConfig{ObjectMeta: metav1.ObjectMeta{Name: consts.DefaultConfigName, Namespace: vars.Namespace}, Spec: sriovnetworkv1.SriovOperatorConfigSpec{FeatureGates: map[string]bool{consts.DynamicResourceAllocationFeatureGate: true}}}
 			first := &sriovnetworkv1.SriovNetworkNodePolicy{ObjectMeta: metav1.ObjectMeta{Name: "first", Namespace: vars.Namespace}, Spec: sriovnetworkv1.SriovNetworkNodePolicySpec{ResourceName: "intel_nic", DeviceType: "netdevice"}}
 			second := &sriovnetworkv1.SriovNetworkNodePolicy{ObjectMeta: metav1.ObjectMeta{Name: "second", Namespace: vars.Namespace}, Spec: sriovnetworkv1.SriovNetworkNodePolicySpec{ResourceName: tc.resource, DeviceType: tc.deviceType}}
 			second.Spec.NicSelector.PfNames = tc.pfNames

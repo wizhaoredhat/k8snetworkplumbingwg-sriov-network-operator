@@ -44,11 +44,7 @@ func (oc *OperatorConfigNodeReconcile) Reconcile(ctx context.Context, req ctrl.R
 		log.Log.Info("Set Disable Drain", "value", vars.DisableDrain)
 	}
 
-	gates, err := operatorConfig.EffectiveFeatureGates()
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if vars.FeatureGate.Set(gates) {
+	if vars.FeatureGate.Set(operatorConfig.Spec.FeatureGates) {
 		log.Log.Info("Updated featureGates", "featureGates", vars.FeatureGate.String())
 	}
 

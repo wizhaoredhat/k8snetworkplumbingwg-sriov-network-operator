@@ -252,37 +252,6 @@ func syncPluginDaemonObjs(ctx context.Context,
 	return nil
 }
 
-func isDaemonSetRolledOut(ds *appsv1.DaemonSet) bool {
-	if ds.Status.ObservedGeneration < ds.Generation {
-		return false
-	}
-	return ds.Status.NumberReady == ds.Status.DesiredNumberScheduled &&
-		ds.Status.UpdatedNumberScheduled == ds.Status.DesiredNumberScheduled
-}
-
-func daemonSetExists(ctx context.Context, c k8sclient.Reader, name string) (bool, error) {
-	err := c.Get(ctx, types.NamespacedName{Namespace: vars.Namespace, Name: name}, &appsv1.DaemonSet{})
-	if errors.IsNotFound(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-// daemonSetRolledOut distinguishes normal rollout progress from API failures.
-func daemonSetRolledOut(ctx context.Context, c k8sclient.Reader, name string) (bool, error) {
-	ds := &appsv1.DaemonSet{}
-	if err := c.Get(ctx, types.NamespacedName{Namespace: vars.Namespace, Name: name}, ds); err != nil {
-		if errors.IsNotFound(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("failed to get DaemonSet %s: %w", name, err)
-	}
-	return isDaemonSetRolledOut(ds), nil
-}
-
 // renderDRADriverObjs is shared by deployment and cleanup so both use the same inventory.
 func renderDRADriverObjs(dc *sriovnetworkv1.SriovOperatorConfig,
 	renderFn renderManifestFunc) ([]*uns.Unstructured, error) {
@@ -435,27 +404,12 @@ func cleanupDevicePluginObjs(ctx context.Context, client k8sclient.Client,
 	return cleanupProviderObjs(ctx, client, objs)
 }
 
-// providerCleanupOrder requests DaemonSet deletion before removing its access.
-// Deletion is asynchronous; this ordering does not wait for pods to terminate.
-func providerCleanupOrder(kind string) int {
-	switch kind {
-	case constants.DaemonSet:
-		return 0
-	case constants.RoleBinding, clusterRoleBindingResourceName:
-		return 1
-	case constants.Role, clusterRoleResourceName:
-		return 2
-	case constants.ServiceAccount:
-		return 3
-	default:
-		return 4
-	}
-}
-
 func cleanupProviderObjs(ctx context.Context, client k8sclient.Client, objs []*uns.Unstructured) error {
 	logger := log.FromContext(ctx).WithName("cleanupProviderObjs")
+	// Request DaemonSet deletion first so a failure preserves its access.
+	// Deletion is asynchronous; this does not wait for pods to terminate.
 	sort.SliceStable(objs, func(i, j int) bool {
-		return providerCleanupOrder(objs[i].GetKind()) < providerCleanupOrder(objs[j].GetKind())
+		return objs[i].GetKind() == constants.DaemonSet && objs[j].GetKind() != constants.DaemonSet
 	})
 	for _, manifest := range objs {
 		var obj k8sclient.Object = manifest

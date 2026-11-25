@@ -171,15 +171,10 @@ func useKubeletKubeConfig() {
 	}
 }
 
-func initFeatureGates(defaultConfig *sriovnetworkv1.SriovOperatorConfig) error {
+func initFeatureGates(defaultConfig *sriovnetworkv1.SriovOperatorConfig) {
 	fnLogger := log.Log.WithName("initFeatureGates")
-	effective, err := defaultConfig.EffectiveFeatureGates()
-	if err != nil {
-		return err
-	}
-	vars.FeatureGate.Set(effective)
+	vars.FeatureGate.Set(defaultConfig.Spec.FeatureGates)
 	fnLogger.Info("Enabled featureGates", "featureGates", vars.FeatureGate.String())
-	return nil
 }
 
 func initLogLevel(defaultConfig *sriovnetworkv1.SriovOperatorConfig) error {
@@ -272,10 +267,7 @@ func runStartCmd(cmd *cobra.Command, args []string) error {
 	}
 
 	// init feature gates
-	if err := initFeatureGates(operatorConfig); err != nil {
-		setupLog.Error(err, "failed to initialize feature gates")
-		return err
-	}
+	initFeatureGates(operatorConfig)
 
 	// init log level
 	if err := initLogLevel(operatorConfig); err != nil {

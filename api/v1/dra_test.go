@@ -12,16 +12,14 @@ import (
 	"github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/consts"
 )
 
-func policyResourceValidator(provider v1.ResourceProvider) *v1.PolicyResourceValidator {
-	config := &v1.SriovOperatorConfig{Status: v1.SriovOperatorConfigStatus{ResourceProvider: provider}}
-	validator, err := config.NewPolicyResourceValidator()
-	Expect(err).NotTo(HaveOccurred())
-	return validator
+func policyResourceValidator(draEnabled bool) *v1.PolicyResourceValidator {
+	config := &v1.SriovOperatorConfig{Spec: v1.SriovOperatorConfigSpec{FeatureGates: map[string]bool{consts.DynamicResourceAllocationFeatureGate: draEnabled}}}
+	return config.NewPolicyResourceValidator()
 }
 
 var _ = Describe("PolicyResourceValidator", func() {
-	DescribeTable("ignores the deprecated default policy while validating active policies", func(provider v1.ResourceProvider) {
-		validator := policyResourceValidator(provider)
+	DescribeTable("ignores the deprecated default policy while validating active policies", func(draEnabled bool) {
+		validator := policyResourceValidator(draEnabled)
 		deprecated := &v1.SriovNetworkNodePolicy{ObjectMeta: metav1.ObjectMeta{Name: consts.DefaultPolicyName}}
 		Expect(validator.Add(deprecated)).To(Succeed())
 		deprecated.Spec = v1.SriovNetworkNodePolicySpec{
@@ -37,7 +35,7 @@ var _ = Describe("PolicyResourceValidator", func() {
 		colliding := active.DeepCopy()
 		colliding.Name = "colliding"
 		colliding.Spec.ResourceName = "SHARED"
-		if provider == v1.DRAResourceProvider() {
+		if draEnabled {
 			Expect(validator.Add(colliding)).To(MatchError(ContainSubstring("normalizes to the same DRA device class name")))
 			Expect(validator.Issue(active.Name)).To(MatchError(ContainSubstring("normalizes to the same DRA device class name")))
 			Expect(validator.Issue(colliding.Name)).To(MatchError(ContainSubstring("normalizes to the same DRA device class name")))
@@ -51,12 +49,12 @@ var _ = Describe("PolicyResourceValidator", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(drivers).To(Equal(map[string]string{"shared": ""}))
 	},
-		Entry("DRA", v1.DRAResourceProvider()),
-		Entry("device plugin", v1.DevicePluginResourceProvider()),
+		Entry("DRA", true),
+		Entry("device plugin", false),
 	)
 
-	DescribeTable("validates DRA-only selectors for the accepted provider", func(provider v1.ResourceProvider, policy v1.SriovNetworkNodePolicy, wantError string) {
-		validator := policyResourceValidator(provider)
+	DescribeTable("validates DRA-only selectors for the selected provider", func(draEnabled bool, policy v1.SriovNetworkNodePolicy, wantError string) {
+		validator := policyResourceValidator(draEnabled)
 		err := validator.Add(&policy)
 		if wantError != "" {
 			Expect(err).To(MatchError(ContainSubstring(wantError)))
@@ -66,31 +64,31 @@ var _ = Describe("PolicyResourceValidator", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(validator.Issue(policy.Name)).NotTo(HaveOccurred())
 	},
-		Entry("DRA accepts a whole PF", v1.DRAResourceProvider(), v1.SriovNetworkNodePolicy{
+		Entry("DRA accepts a whole PF", true, v1.SriovNetworkNodePolicy{
 			ObjectMeta: metav1.ObjectMeta{Name: "whole-pf"},
 			Spec:       v1.SriovNetworkNodePolicySpec{ResourceName: "nic", NicSelector: v1.SriovNetworkNicSelector{PfNames: []string{"ens1f0"}}},
 		}, ""),
-		Entry("DRA rejects a VF range", v1.DRAResourceProvider(), v1.SriovNetworkNodePolicy{
+		Entry("DRA rejects a VF range", true, v1.SriovNetworkNodePolicy{
 			ObjectMeta: metav1.ObjectMeta{Name: "ranged-pf"},
 			Spec:       v1.SriovNetworkNodePolicySpec{ResourceName: "nic", NicSelector: v1.SriovNetworkNicSelector{PfNames: []string{"ens1f0#2-5"}}},
 		}, "VF range"),
-		Entry("DRA rejects netFilter", v1.DRAResourceProvider(), v1.SriovNetworkNodePolicy{
+		Entry("DRA rejects netFilter", true, v1.SriovNetworkNodePolicy{
 			ObjectMeta: metav1.ObjectMeta{Name: "net-filter"},
 			Spec:       v1.SriovNetworkNodePolicySpec{ResourceName: "nic", NicSelector: v1.SriovNetworkNicSelector{NetFilter: "aws/NetworkID:net-1"}},
 		}, "netFilter selector is not supported in DRA mode"),
-		Entry("device plugin accepts DRA-only selectors", v1.DevicePluginResourceProvider(), v1.SriovNetworkNodePolicy{
+		Entry("device plugin accepts DRA-only selectors", false, v1.SriovNetworkNodePolicy{
 			ObjectMeta: metav1.ObjectMeta{Name: "device-plugin"},
 			Spec:       v1.SriovNetworkNodePolicySpec{ResourceName: "nic", NicSelector: v1.SriovNetworkNicSelector{PfNames: []string{"ens1f0#2-5"}, NetFilter: "aws/NetworkID:net-1"}},
 		}, ""),
-		Entry("DRA accepts a 63-character resource name", v1.DRAResourceProvider(), v1.SriovNetworkNodePolicy{
+		Entry("DRA accepts a 63-character resource name", true, v1.SriovNetworkNodePolicy{
 			ObjectMeta: metav1.ObjectMeta{Name: "max-length-resource-name"},
 			Spec:       v1.SriovNetworkNodePolicySpec{ResourceName: strings.Repeat("a", v1.ResourceNameMaxLen)},
 		}, ""),
-		Entry("DRA rejects a resource name longer than 63 characters", v1.DRAResourceProvider(), v1.SriovNetworkNodePolicy{
+		Entry("DRA rejects a resource name longer than 63 characters", true, v1.SriovNetworkNodePolicy{
 			ObjectMeta: metav1.ObjectMeta{Name: "over-length-resource-name"},
 			Spec:       v1.SriovNetworkNodePolicySpec{ResourceName: strings.Repeat("a", v1.ResourceNameMaxLen+1)},
 		}, "no more than 63"),
-		Entry("device plugin rejects a resource name longer than 63 characters", v1.DevicePluginResourceProvider(), v1.SriovNetworkNodePolicy{
+		Entry("device plugin rejects a resource name longer than 63 characters", false, v1.SriovNetworkNodePolicy{
 			ObjectMeta: metav1.ObjectMeta{Name: "device-plugin-over-length-resource-name"},
 			Spec:       v1.SriovNetworkNodePolicySpec{ResourceName: strings.Repeat("a", v1.ResourceNameMaxLen+1)},
 		}, "no more than 63"),
@@ -137,7 +135,7 @@ var _ = Describe("PolicyResourceValidator", func() {
 	)
 
 	It("attributes a shared conflict to every policy in the class without spreading local errors", func() {
-		validator := policyResourceValidator(v1.DRAResourceProvider())
+		validator := policyResourceValidator(true)
 		first := &v1.SriovNetworkNodePolicy{
 			ObjectMeta: metav1.ObjectMeta{Name: "first"},
 			Spec:       v1.SriovNetworkNodePolicySpec{ResourceName: "shared", DeviceType: consts.DeviceTypeNetDevice},

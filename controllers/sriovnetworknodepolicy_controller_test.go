@@ -23,44 +23,11 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	k8sclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sriovnetworkv1 "github.com/k8snetworkplumbingwg/sriov-network-operator/api/v1"
 	"github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/consts"
 	"github.com/k8snetworkplumbingwg/sriov-network-operator/pkg/vars"
 )
-
-var _ = Describe("Policy reconciliation resource provider", func() {
-	for _, tc := range []struct {
-		name         string
-		provider     sriovnetworkv1.ResourceProvider
-		requestedDRA bool
-		wantErr      string
-	}{
-		{name: "uninitialized"},
-		{name: "invalid", provider: sriovnetworkv1.ResourceProvider{DevicePlugin: true, DRA: true}, wantErr: "invalid accepted resource provider: simultaneous device-plugin and DRA providers are not supported"},
-		{name: "provider transition without policies", provider: sriovnetworkv1.DevicePluginResourceProvider(), requestedDRA: true, wantErr: "requested resource provider has not been accepted; wait for status.resourceProvider to match the requested provider"},
-	} {
-		It(tc.name, func(ctx SpecContext) {
-			config := &sriovnetworkv1.SriovOperatorConfig{
-				ObjectMeta: metav1.ObjectMeta{Name: consts.DefaultConfigName, Namespace: vars.Namespace},
-				Spec:       sriovnetworkv1.SriovOperatorConfigSpec{FeatureGates: map[string]bool{consts.DynamicResourceAllocationFeatureGate: tc.requestedDRA}},
-			}
-			createAggregateObjects(config)
-			config.Status.ResourceProvider = tc.provider
-			Expect(k8sClient.Status().Update(ctx, config)).To(Succeed())
-			r := &SriovNetworkNodePolicyReconciler{Client: k8sClient}
-			result, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: nodePolicySyncEventName}})
-			if tc.wantErr != "" {
-				Expect(err).To(MatchError(tc.wantErr))
-				Expect(result.RequeueAfter).To(BeZero())
-			} else {
-				Expect(err).NotTo(HaveOccurred())
-				Expect(result.RequeueAfter).To(Equal(consts.DrainControllerRequeueTime))
-			}
-		})
-	}
-})
 
 func mustMarshallSelector(t *testing.T, input *dptypes.NetDeviceSelectors) *json.RawMessage {
 	out, err := json.Marshal(input)
@@ -284,8 +251,7 @@ var _ = Describe("SriovnetworkNodePolicy controller", Ordered, func() {
 		By("Create SriovOperatorConfig controller k8s objs")
 		config := makeDefaultSriovOpConfig()
 		Expect(k8sClient.Create(context.Background(), config)).Should(Succeed())
-		config.Status.ResourceProvider = sriovnetworkv1.DevicePluginResourceProvider()
-		Expect(k8sClient.Status().Update(context.Background(), config)).Should(Succeed())
+
 		DeferCleanup(func() {
 			err := k8sClient.Delete(context.Background(), config)
 			Expect(err).ToNot(HaveOccurred())

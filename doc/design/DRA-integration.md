@@ -830,12 +830,13 @@ When Policy Changes:
 - Consistent behavior for both device plugin and DRA modes
 
 **4. Mode Switching and Resource Management**
+
+See the [DRA user guide](../advanced-features.md#6-dynamic-resource-allocation-dynamicresourceallocation) for the validation list, plain-English enablement flow, and commands to verify provider removal and readiness.
 - The validation webhook rejects enabling or disabling DRA while any `SriovNetworkNodePolicy` exists in the operator namespace. This includes creating a DRA-enabled operator config, setting the gate to `false`, or removing the gate or the entire `featureGates` map when DRA was enabled. Updates that leave the mode unchanged remain allowed. This restriction does not verify that workloads have stopped or that policy cleanup and node reconfiguration have finished.
-- *(Not yet implemented)* Switching between device plugin and DRA mode should be blocked if:
-  - There are active pods using SR-IOV resources
-  - There are existing ResourceClaims (when switching from DRA to device plugin)
-- *(Not yet implemented)* Validation webhook should enforce this
-- The config controller independently checks policies before accepting a mode change and persists the accepted mode in `SriovOperatorConfig.status.resourceProvider` (`{devicePlugin: true, dra: false}` or `{devicePlugin: false, dra: true}`). Both controllers and the config daemon use the accepted mode, so a rejected spec change stays blocked across restarts. On upgrade, the controller identifies the current provider from existing DaemonSets; an ambiguous installation with policies requires removing policies before initialization. Consumers wait for initialization instead of acting on the requested gate.
+- Users must stop affected workloads and prevent their recreation before switching. When leaving DRA, release affected SR-IOV ResourceClaims while the DRA driver is still running. The webhook does not check these prerequisites.
+- Provider selection comes directly from `spec.featureGates.dynamicResourceAllocation`; no accepted-provider state or switch progress is stored in status. Controllers and the config daemon use the configured gate. The webhook protects mode changes while policies exist; the config controller does not duplicate that protection when admission is bypassed.
+- For the **First Release of the DRA Integration**, the operator deploys the selected provider and then removes the previous provider in the same reconciliation, without waiting for readiness. Users must wait for the old DaemonSet and pods to disappear and the new provider rollout to complete before creating policies. Policy admission does not block creation during a switch. A failed deployment or incomplete switch requires the user to resolve the failure before proceeding; the operator config's `Ready` condition alone is not a rollout-completion signal.
+- A **Subsequent Release of the DRA Integration** is planned to support concurrent DRA and device-plugin operation and requires work in both providers. The first release implements only the manual switching procedure; see the [kubectl examples](../advanced-features.md#6-dynamic-resource-allocation-dynamicresourceallocation).
 - Policies must be created in the operator namespace. Admission rejects creation and updates elsewhere, allows deletion, and controllers list policies only in the operator namespace.
 - When switching to DRA mode:
   - Operator stops updating `device-plugin-config` ConfigMap and retains it for reuse when returning to device-plugin mode
@@ -843,7 +844,7 @@ When Policy Changes:
   - Operator creates per-resourceName DeviceClasses with `extendedResourceName` via `syncExtendedResourceDeviceClasses()`
 - When switching to device plugin mode:
   - Operator deletes all auto-generated `SriovResourcePolicy`, `DeviceAttributes`, and extended-resource `DeviceClass` CRs (label `sriovnetwork.openshift.io/generated-by: sriov-network-operator`)
-  - Operator removes DRA driver DaemonSet and deploys device plugin DaemonSet
+  - Operator deploys device plugin DaemonSet and removes DRA driver DaemonSet
   - Operator resumes updating `device-plugin-config` ConfigMap
 
 **4. Resource Naming**
@@ -909,7 +910,7 @@ When Policy Changes:
 
 #### Constraints
 
-1. **No Mixed Mode**: A cluster cannot run both device plugin and DRA driver simultaneously
+1. **No Mixed Mode**: Concurrent device allocation by DRA and device plugin is unsupported in this release. Their DaemonSets can briefly coexist during a switch, while all SR-IOV workloads and policies must remain removed
 2. **Kubernetes Version**: DRA mode requires Kubernetes 1.34 or later (cluster admin prerequisite; not enforced by the operator)
 3. **Runtime Requirements**: DRA driver requires CDI support; NRI is not required in MULTUS mode
 4. **Migration Complexity**: Migrating existing workloads from device plugin to DRA requires pod recreation
@@ -937,7 +938,7 @@ When Policy Changes:
      featureGates:
        dynamicResourceAllocation: true
    ```
-5. Wait for `status.resourceProvider: {devicePlugin: false, dra: true}`, the DRA driver DaemonSet rollout, and the operator's `Ready` condition for the updated generation. The operator installs DRA before removing the device plugin.
+5. Wait for the device-plugin DaemonSet **and pods** to be removed and for the DRA driver DaemonSet rollout to complete, with Ready pods on all managed nodes. Use the [kubectl examples](../advanced-features.md#6-dynamic-resource-allocation-dynamicresourceallocation). The operator installs DRA before removing the device plugin but does not wait for rollout; users must complete these checks before reapplying policies.
 6. Reapply DRA-compatible policies. The operator auto-generates `SriovResourcePolicy` and `DeviceAttributes` CRs (CRDs are already installed). Wait for node configuration and device advertisement to complete
 7. Recreate workloads using ResourceClaims instead of device plugin resources
 
@@ -958,12 +959,12 @@ When Policy Changes:
      featureGates:
        dynamicResourceAllocation: false
    ```
-5. Wait for `status.resourceProvider: {devicePlugin: true, dra: false}`, the device-plugin DaemonSet rollout, and the operator's `Ready` condition for the updated generation. The operator installs the device plugin before removing the DRA driver and its resources. It resumes updating the retained `device-plugin-config`; `SriovResourcePolicy` and `DeviceAttributes` CRDs remain installed.
+5. Wait for the DRA driver DaemonSet **and pods** to be removed and the device-plugin DaemonSet to be deployed with a completed rollout. With no policies, `DESIRED=0` and no device-plugin pods is expected; pods start on configured nodes after policies are reapplied. Use the [kubectl examples](../advanced-features.md#6-dynamic-resource-allocation-dynamicresourceallocation). The operator installs the device plugin before removing DRA without waiting for readiness. It resumes updating the retained `device-plugin-config`; `SriovResourcePolicy` and `DeviceAttributes` CRDs remain installed.
 6. Reapply device-plugin-compatible policies and wait for node configuration and device advertisement to complete
 7. Recreate workloads using device plugin resource requests
 
 ##### Rolling Back Operator Version
-- Before rolling back, complete the full [Disabling DRA on Existing Cluster](#disabling-dra-on-existing-cluster) sequence: stop affected workloads, release their ResourceClaims, remove the DRA policies, and wait for provider acceptance and the resulting rollout to complete.
+- Before rolling back, complete the full [Disabling DRA on Existing Cluster](#disabling-dra-on-existing-cluster) sequence: stop affected workloads, release their ResourceClaims, remove the DRA policies, and wait for the old provider to be removed and the replacement rollout to complete.
 - If rolling back to a version that doesn't support the DRA feature gate:
   - Must first disable DRA mode (`dynamicResourceAllocation: false`)
   - Wait for the device plugin to be deployed

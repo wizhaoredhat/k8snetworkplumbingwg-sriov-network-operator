@@ -70,17 +70,6 @@ func validateDRAModeChange(cr *sriovnetworkv1.SriovOperatorConfig, operation v1.
 		}
 		if found {
 			previouslyEnabled = previousConfig.Spec.FeatureGates[consts.DynamicResourceAllocationFeatureGate]
-			if enabled == previouslyEnabled {
-				return nil
-			}
-			// Allow reverting a request that the controller rejected while
-			// admission was disabled. The accepted provider has not changed.
-			switch previousConfig.Status.ResourceProvider {
-			case sriovnetworkv1.DevicePluginResourceProvider():
-				previouslyEnabled = false
-			case sriovnetworkv1.DRAResourceProvider():
-				previouslyEnabled = true
-			}
 		}
 	}
 	if enabled == previouslyEnabled {
@@ -180,9 +169,6 @@ func validateSriovNetworkNodePolicy(cr *sriovnetworkv1.SriovNetworkNodePolicy, o
 	if err != nil {
 		return admit, warnings, err
 	}
-	if err := validateDRAPolicyNetFilter(cr); err != nil {
-		return false, warnings, err
-	}
 
 	admit, err = dynamicValidateSriovNetworkNodePolicy(cr)
 	if err != nil {
@@ -190,27 +176,6 @@ func validateSriovNetworkNodePolicy(cr *sriovnetworkv1.SriovNetworkNodePolicy, o
 	}
 
 	return admit, warnings, nil
-}
-
-// validateDRAPolicyNetFilter rejects netFilter selectors in the operator namespace
-// when DRA is enabled, because dra-driver-sriov resource filters cannot represent them.
-func validateDRAPolicyNetFilter(cr *sriovnetworkv1.SriovNetworkNodePolicy) error {
-	if cr.Namespace != vars.Namespace || cr.Spec.NicSelector.NetFilter == "" {
-		return nil
-	}
-	config, found, err := sriovnetworkv1.GetOperatorConfig(context.Background(), client)
-	if err != nil {
-		return fmt.Errorf("can't validate policy %s/%s netFilter compatibility with DRA: %w", cr.Namespace, cr.Name, err)
-	}
-	if !found {
-		// Shared resource validation rejects policies without an operator config.
-		return nil
-	}
-	if config.Spec.FeatureGates[consts.DynamicResourceAllocationFeatureGate] {
-		return fmt.Errorf("policy %s/%s: spec.nicSelector.netFilter is not supported when %s is enabled",
-			cr.Namespace, cr.Name, consts.DynamicResourceAllocationFeatureGate)
-	}
-	return nil
 }
 
 func staticValidateSriovNetworkNodePolicy(cr *sriovnetworkv1.SriovNetworkNodePolicy) (bool, error) {
@@ -341,15 +306,7 @@ func validateDRAResourcePolicies(cr *sriovnetworkv1.SriovNetworkNodePolicy, npLi
 	if !found {
 		return fmt.Errorf("SriovOperatorConfig %s/%s not found; wait for the operator config before creating or updating policies", vars.Namespace, consts.DefaultConfigName)
 	}
-	requestedProvider := config.RequestedResourceProvider()
-	// A new policy would prevent the config controller from accepting the switch.
-	if config.Status.ResourceProvider != requestedProvider {
-		return fmt.Errorf("requested resource provider has not been accepted; wait for status.resourceProvider to match the requested provider before creating or updating policies")
-	}
-	validator, err := config.NewPolicyResourceValidator()
-	if err != nil {
-		return fmt.Errorf("failed to determine resource provider for policy validation: %w", err)
-	}
+	validator := config.NewPolicyResourceValidator()
 	if err := validator.Add(cr); err != nil {
 		return err
 	}
@@ -370,6 +327,15 @@ func dynamicValidateSriovNetworkNodePolicy(cr *sriovnetworkv1.SriovNetworkNodePo
 	interfaceSelected = false
 	nodeInterfaceErrorList := make(map[string][]string)
 
+	npList := &sriovnetworkv1.SriovNetworkNodePolicyList{}
+	err := client.List(context.Background(), npList, &runtimeclient.ListOptions{Namespace: namespace})
+	if err != nil {
+		return false, err
+	}
+	if err := validateDRAResourcePolicies(cr, npList); err != nil {
+		return false, err
+	}
+
 	nodeList, err := kubeclient.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{
 		LabelSelector: labels.Set(cr.Spec.NodeSelector).String(),
 	})
@@ -381,14 +347,7 @@ func dynamicValidateSriovNetworkNodePolicy(cr *sriovnetworkv1.SriovNetworkNodePo
 	if err != nil {
 		return false, err
 	}
-	npList := &sriovnetworkv1.SriovNetworkNodePolicyList{}
-	err = client.List(context.Background(), npList, &runtimeclient.ListOptions{Namespace: namespace})
-	if err != nil {
-		return false, err
-	}
-	if err := validateDRAResourcePolicies(cr, npList); err != nil {
-		return false, err
-	}
+
 	for _, node := range nodeList.Items {
 		if cr.Selected(&node) {
 			nodesSelected = true

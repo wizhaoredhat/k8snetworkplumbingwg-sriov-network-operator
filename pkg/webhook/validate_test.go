@@ -753,10 +753,6 @@ func TestValidateDRAResourceNameCollision(t *testing.T) {
 		t.Run(fmt.Sprintf("DRA enabled=%t", draEnabled), func(t *testing.T) {
 			config, _ := setupDRANetFilterValidation(t)
 			config.Spec.FeatureGates[constants.DynamicResourceAllocationFeatureGate] = draEnabled
-			config.Status.ResourceProvider = DevicePluginResourceProvider()
-			if draEnabled {
-				config.Status.ResourceProvider = DRAResourceProvider()
-			}
 			client = fake.NewClientBuilder().WithScheme(vars.Scheme).WithObjects(config).Build()
 			g := NewGomegaWithT(t)
 
@@ -1849,63 +1845,35 @@ func TestValidatePolicyForNodePolicyWithAltNameConflict(t *testing.T) {
 	g.Expect(err).NotTo(HaveOccurred())
 }
 
-var _ = Describe("resource provider acceptance", func() {
-	It("validates the expected behavior", func() {
-		for _, tc := range []struct {
-			name       string
-			draEnabled bool
-			accepted   ResourceProvider
-			noConfig   bool
-			wantError  bool
-		}{
-			{name: "pending enable", draEnabled: true, accepted: DevicePluginResourceProvider(), wantError: true},
-			{name: "pending disable", accepted: DRAResourceProvider(), wantError: true},
-			{name: "accepted DRA", draEnabled: true, accepted: DRAResourceProvider()},
-			{name: "accepted device plugin", accepted: DevicePluginResourceProvider()},
-			{name: "DRA not initialized", draEnabled: true, wantError: true},
-			{name: "device plugin not initialized", wantError: true},
-			{name: "both providers enabled", draEnabled: true, accepted: ResourceProvider{DevicePlugin: true, DRA: true}, wantError: true},
-			{name: "missing config", noConfig: true, wantError: true},
-		} {
-			By(tc.name)
-			config, policy := setupDRANetFilterValidation()
-			config.Spec.FeatureGates[constants.DynamicResourceAllocationFeatureGate] = tc.draEnabled
-			config.Status.ResourceProvider = tc.accepted
-			policy.Spec.NicSelector = SriovNetworkNicSelector{PfNames: []string{"ens803f1"}}
-			builder := fake.NewClientBuilder().WithScheme(vars.Scheme).WithStatusSubresource(config)
-			if !tc.noConfig {
-				builder.WithObjects(config)
-			}
-			client = builder.Build()
-			err := validateDRAResourcePolicies(policy, &SriovNetworkNodePolicyList{})
-			if tc.wantError {
-				if tc.noConfig {
-					Expect(err).To(MatchError(ContainSubstring("SriovOperatorConfig " + vars.Namespace + "/default not found")))
-					Expect(client.Create(context.Background(), config)).To(Succeed())
-				} else {
-					Expect(err).To(MatchError(ContainSubstring("requested resource provider has not been accepted")))
-				}
-				// Once the controller accepts the request, the same policy is valid.
-				Expect(client.Get(context.Background(), runtimeclient.ObjectKeyFromObject(config), config)).To(Succeed())
-				config.Status.ResourceProvider = DevicePluginResourceProvider()
-				if tc.draEnabled {
-					config.Status.ResourceProvider = DRAResourceProvider()
-				}
-				Expect(client.Status().Update(context.Background(), config)).To(Succeed())
-				Expect(validateDRAResourcePolicies(policy, &SriovNetworkNodePolicyList{})).To(Succeed())
-			} else {
-				Expect(err).NotTo(HaveOccurred())
-			}
+var _ = Describe("policy admission during provider deployment", func() {
+	DescribeTable("uses the feature gate without requiring provider status or deployed DaemonSets", func(draEnabled, noConfig bool) {
+		config, policy := setupDRANetFilterValidation()
+		config.Spec.FeatureGates[constants.DynamicResourceAllocationFeatureGate] = draEnabled
+		config.Status.Conditions = []metav1.Condition{{Type: ConditionReady, Status: metav1.ConditionFalse, Reason: "OperatorConfigSyncFailed"}}
+		policy.Spec.NicSelector = SriovNetworkNicSelector{PfNames: []string{"ens803f1"}}
+		builder := fake.NewClientBuilder().WithScheme(vars.Scheme)
+		if !noConfig {
+			builder.WithObjects(config)
 		}
-	})
+		client = builder.Build()
+		err := validateDRAResourcePolicies(policy, &SriovNetworkNodePolicyList{})
+		if noConfig {
+			Expect(err).To(MatchError(ContainSubstring("not found")))
+		} else {
+			Expect(err).NotTo(HaveOccurred())
+		}
+	},
+		Entry("DRA", true, false),
+		Entry("device plugin", false, false),
+		Entry("missing operator config", false, true),
+	)
 })
 
-var _ = Describe("policy deletion before provider acceptance", func() {
+var _ = Describe("policy deletion during a provider switch", func() {
 	It("validates the expected behavior", func() {
 		for _, name := range []string{"pending switch", "missing config"} {
 			By(name)
 			config, policy := setupDRANetFilterValidation()
-			config.Status.ResourceProvider = DevicePluginResourceProvider()
 			builder := fake.NewClientBuilder().WithScheme(vars.Scheme)
 			if name == "pending switch" {
 				builder.WithObjects(config)
@@ -1971,10 +1939,6 @@ var _ = Describe("DRA resource drivers", func() {
 			if tc.prepare != nil {
 				tc.prepare(config, policy, other)
 			}
-			config.Status.ResourceProvider = DevicePluginResourceProvider()
-			if config.Spec.FeatureGates[constants.DynamicResourceAllocationFeatureGate] {
-				config.Status.ResourceProvider = DRAResourceProvider()
-			}
 			client = fake.NewClientBuilder().WithScheme(vars.Scheme).WithObjects(config).Build()
 			err := validateDRAResourcePolicies(policy, &SriovNetworkNodePolicyList{Items: []SriovNetworkNodePolicy{*other}})
 			if tc.wantError {
@@ -2020,13 +1984,6 @@ var _ = Describe("DRA mode changes", func() {
 			noConfig       bool
 			wantError      bool
 		}{
-			{name: "revert rejected enable request", operation: admissionv1.Update, alreadyEnabled: true, prepare: func(c *SriovOperatorConfig, _ *SriovNetworkNodePolicy) {
-				c.Spec.FeatureGates = nil
-				c.Status.ResourceProvider = DevicePluginResourceProvider()
-			}},
-			{name: "revert rejected disable request", operation: admissionv1.Update, prepare: func(c *SriovOperatorConfig, _ *SriovNetworkNodePolicy) {
-				c.Status.ResourceProvider = DRAResourceProvider()
-			}},
 			{name: "reject enabling DRA", operation: admissionv1.Update, wantError: true},
 			{name: "reject enabling with missing config", operation: admissionv1.Update, noConfig: true, wantError: true},
 			{name: "reject creating enabled config", operation: admissionv1.Create, wantError: true},
@@ -2163,7 +2120,12 @@ var _ = Describe("DRA policy net filters", func() {
 				builder.WithObjects(config)
 			}
 			client = builder.Build()
-			Expect(validateDRAPolicyNetFilter(policy)).To(Succeed())
+			err := validateDRAResourcePolicies(policy, &SriovNetworkNodePolicyList{})
+			if tc.noConfig {
+				Expect(err).To(MatchError(ContainSubstring("not found")))
+			} else {
+				Expect(err).NotTo(HaveOccurred())
+			}
 		}
 	})
 })
@@ -2180,7 +2142,7 @@ var _ = Describe("DRA policy admission", func() {
 				Expect(allowed).To(BeTrue())
 			} else {
 				Expect(allowed).To(BeFalse())
-				Expect(err).To(MatchError(ContainSubstring("policy " + policy.Namespace + "/" + policy.Name + ": spec.nicSelector.netFilter is not supported")))
+				Expect(err).To(MatchError(ContainSubstring("netFilter selector is not supported in DRA mode")))
 			}
 		}
 	})
@@ -2248,10 +2210,6 @@ var _ = Describe("DRA policy VF ranges", func() {
 			By(tc.name)
 			config, policy := setupDRANetFilterValidation()
 			config.Spec.FeatureGates[constants.DynamicResourceAllocationFeatureGate] = tc.draEnabled
-			config.Status.ResourceProvider = DevicePluginResourceProvider()
-			if tc.draEnabled {
-				config.Status.ResourceProvider = DRAResourceProvider()
-			}
 			policy.Spec.NicSelector = SriovNetworkNicSelector{PfNames: tc.pfNames}
 			policy.Spec.NumVfs = 8
 			client = fake.NewClientBuilder().WithScheme(vars.Scheme).WithObjects(config).Build()

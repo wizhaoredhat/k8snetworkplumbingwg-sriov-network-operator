@@ -27,14 +27,9 @@ type policyResourceClassState struct {
 	issue        error
 }
 
-// NewPolicyResourceValidator creates a validator for the provider accepted by
-// this operator configuration.
-func (cr *SriovOperatorConfig) NewPolicyResourceValidator() (*PolicyResourceValidator, error) {
-	gates, err := cr.EffectiveFeatureGates()
-	if err != nil {
-		return nil, err
-	}
-	return newPolicyResourceValidator(gates[consts.DynamicResourceAllocationFeatureGate]), nil
+// NewPolicyResourceValidator creates a validator for the provider selected by the feature gate.
+func (cr *SriovOperatorConfig) NewPolicyResourceValidator() *PolicyResourceValidator {
+	return newPolicyResourceValidator(cr.Spec.FeatureGates[consts.DynamicResourceAllocationFeatureGate])
 }
 
 func newPolicyResourceValidator(draEnabled bool) *PolicyResourceValidator {
@@ -61,7 +56,7 @@ func (v *PolicyResourceValidator) Add(policy *SriovNetworkNodePolicy) error {
 	}
 
 	// Selector constraints describe the generated DeviceClass and therefore apply
-	// only while DRA is the accepted resource provider.
+	// only while the DRA feature gate is enabled.
 	if v.draEnabled {
 		if policy.Spec.NicSelector.NetFilter != "" {
 			return v.recordPolicyIssue(policy.Name, fmt.Errorf("policy %q: netFilter selector is not supported in DRA mode; use device-plugin mode", policy.Name))
@@ -80,31 +75,32 @@ func (v *PolicyResourceValidator) Add(policy *SriovNetworkNodePolicy) error {
 	// DRA renders a DeviceClass from the resource name, so normalized names
 	// must be unique.
 	className := ResourceNameToDeviceClassName(resourceName)
-	class, found := v.classes[className]
-	if found && class.issue != nil {
-		v.issues[policy.Name] = class.issue
-		class.policyNames = append(class.policyNames, policy.Name)
-		return class.issue
-	}
-	if found && class.resourceName != resourceName {
-		err := fmt.Errorf("resourceName %q in policy %q normalizes to the same DRA device class name %q as policy %q resourceName %q",
-			resourceName, policy.Name, className, class.owner, class.resourceName)
-		v.recordClassIssue(class, policy.Name, err)
-		return err
-	}
 	// An empty allocation driver preserves the kernel driver configured by
 	// the config daemon, allowing different vendors' netdevices to share a resource.
 	driver := ""
 	if policy.Spec.DeviceType == consts.DeviceTypeVfioPci {
 		driver = consts.DeviceTypeVfioPci
 	}
-	if found && class.driver != driver {
-		err := fmt.Errorf("policies %q and %q have incompatible deviceType settings for DRA resource %q: vfio-pci and netdevice cannot share a DeviceClass",
-			class.owner, policy.Name, resourceName)
-		v.recordClassIssue(class, policy.Name, err)
-		return err
-	}
-	if !found {
+	class, found := v.classes[className]
+	if found {
+		if class.issue != nil {
+			v.issues[policy.Name] = class.issue
+			class.policyNames = append(class.policyNames, policy.Name)
+			return class.issue
+		}
+		if class.resourceName != resourceName {
+			err := fmt.Errorf("resourceName %q in policy %q normalizes to the same DRA device class name %q as policy %q resourceName %q",
+				resourceName, policy.Name, className, class.owner, class.resourceName)
+			v.recordClassIssue(class, policy.Name, err)
+			return err
+		}
+		if class.driver != driver {
+			err := fmt.Errorf("policies %q and %q have incompatible deviceType settings for DRA resource %q: vfio-pci and netdevice cannot share a DeviceClass",
+				class.owner, policy.Name, resourceName)
+			v.recordClassIssue(class, policy.Name, err)
+			return err
+		}
+	} else {
 		class = &policyResourceClassState{resourceName: resourceName, driver: driver}
 		v.classes[className] = class
 	}

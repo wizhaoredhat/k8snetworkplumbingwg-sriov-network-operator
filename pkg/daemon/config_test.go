@@ -139,8 +139,7 @@ var _ = Describe("Daemon OperatorConfig Controller", Ordered, func() {
 
 			err := k8sClient.Create(ctx, soc)
 			Expect(err).ToNot(HaveOccurred())
-			soc.Status.ResourceProvider = sriovnetworkv1.DevicePluginResourceProvider()
-			Expect(k8sClient.Status().Update(ctx, soc)).To(Succeed())
+
 			EventuallyWithOffset(1, func(g Gomega) {
 				g.Expect(vars.FeatureGate.IsEnabled("test")).To(BeTrue())
 			}, "15s", "3s").Should(Succeed())
@@ -173,8 +172,8 @@ func validateExpectedDrain(disableDrain bool) {
 	}, "15s", "3s").Should(Succeed())
 }
 
-var _ = Describe("Daemon accepted resource provider", func() {
-	It("uses the accepted provider across status updates and daemon restarts", func(ctx SpecContext) {
+var _ = Describe("Daemon resource provider feature gate", func() {
+	It("uses the feature gate on config changes and daemon restarts", func(ctx SpecContext) {
 		savedGate := vars.FeatureGate
 		savedDrain := vars.DisableDrain
 		savedLogLevel := snolog.GetLogLevel()
@@ -195,29 +194,18 @@ var _ = Describe("Daemon accepted resource provider", func() {
 		DeferCleanup(func(ctx SpecContext) {
 			Expect(k8sClient.Delete(ctx, soc)).To(Succeed())
 		})
-		soc.Status.ResourceProvider = sriovnetworkv1.DevicePluginResourceProvider()
-		Expect(k8sClient.Status().Update(ctx, soc)).To(Succeed())
-
-		By("keeping DRA disabled while the enabling request is blocked")
 		watcher := daemon.NewOperatorConfigNodeReconcile(k8sClient)
 		_, err := watcher.Reconcile(ctx, ctrl.Request{})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(vars.FeatureGate.IsEnabled(consts.DynamicResourceAllocationFeatureGate)).To(BeFalse())
-
-		By("enabling DRA after a status-only acceptance")
-		soc.Status.ResourceProvider = sriovnetworkv1.DRAResourceProvider()
-		Expect(k8sClient.Status().Update(ctx, soc)).To(Succeed())
-		_, err = watcher.Reconcile(ctx, ctrl.Request{})
-		Expect(err).NotTo(HaveOccurred())
 		Expect(vars.FeatureGate.IsEnabled(consts.DynamicResourceAllocationFeatureGate)).To(BeTrue())
 
-		By("restoring the accepted provider after a restart with a blocked disabling request")
+		By("restoring device-plugin mode after the gate is removed and the daemon restarts")
 		soc.Spec.FeatureGates = nil
 		Expect(k8sClient.Update(ctx, soc)).To(Succeed())
 		vars.FeatureGate = featuregate.New()
 		watcher = daemon.NewOperatorConfigNodeReconcile(k8sClient)
 		_, err = watcher.Reconcile(ctx, ctrl.Request{})
 		Expect(err).NotTo(HaveOccurred())
-		Expect(vars.FeatureGate.IsEnabled(consts.DynamicResourceAllocationFeatureGate)).To(BeTrue())
+		Expect(vars.FeatureGate.IsEnabled(consts.DynamicResourceAllocationFeatureGate)).To(BeFalse())
 	})
 })

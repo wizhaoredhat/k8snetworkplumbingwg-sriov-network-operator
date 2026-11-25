@@ -1874,60 +1874,6 @@ func TestPoolHasHostConfigurations(t *testing.T) {
 	}
 }
 
-var _ = Describe("SriovOperatorConfig.EffectiveFeatureGates", func() {
-	DescribeTable("uses the accepted provider and returns an independent feature-gate map", func(provider v1.ResourceProvider) {
-		config := &v1.SriovOperatorConfig{
-			Spec: v1.SriovOperatorConfigSpec{FeatureGates: map[string]bool{
-				consts.DynamicResourceAllocationFeatureGate: provider != v1.DRAResourceProvider(),
-				consts.ParallelNicConfigFeatureGate:         true,
-			}},
-			Status: v1.SriovOperatorConfigStatus{ResourceProvider: provider},
-		}
-		original := config.DeepCopy()
-
-		gates, err := config.EffectiveFeatureGates()
-
-		Expect(err).NotTo(HaveOccurred())
-		Expect(gates).To(Equal(map[string]bool{
-			consts.DynamicResourceAllocationFeatureGate: provider == v1.DRAResourceProvider(),
-			consts.ParallelNicConfigFeatureGate:         true,
-		}))
-		Expect(config).To(Equal(original))
-		gates[consts.ParallelNicConfigFeatureGate] = false
-		Expect(config).To(Equal(original), "mutating the returned map must not change the requested configuration")
-	},
-		Entry("device plugin", v1.DevicePluginResourceProvider()),
-		Entry("DRA", v1.DRAResourceProvider()),
-	)
-
-	DescribeTable("handles an unset feature-gate map", func(provider v1.ResourceProvider) {
-		config := &v1.SriovOperatorConfig{Status: v1.SriovOperatorConfigStatus{ResourceProvider: provider}}
-
-		gates, err := config.EffectiveFeatureGates()
-
-		Expect(err).NotTo(HaveOccurred())
-		Expect(gates).To(Equal(map[string]bool{
-			consts.DynamicResourceAllocationFeatureGate: provider == v1.DRAResourceProvider(),
-		}))
-		Expect(config.Spec.FeatureGates).To(BeNil())
-	},
-		Entry("device plugin", v1.DevicePluginResourceProvider()),
-		Entry("DRA", v1.DRAResourceProvider()),
-	)
-
-	DescribeTable("rejects an uninitialized or unsupported provider", func(provider v1.ResourceProvider, message string) {
-		config := &v1.SriovOperatorConfig{Status: v1.SriovOperatorConfigStatus{ResourceProvider: provider}}
-
-		gates, err := config.EffectiveFeatureGates()
-
-		Expect(err).To(MatchError(message))
-		Expect(gates).To(BeNil())
-	},
-		Entry("uninitialized", v1.ResourceProvider{}, "resource provider has not been initialized by the operator"),
-		Entry("both providers", v1.ResourceProvider{DevicePlugin: true, DRA: true}, "simultaneous device-plugin and DRA providers are not supported"),
-	)
-})
-
 var _ = Describe("GetOperatorConfig", func() {
 	var scheme *runtime.Scheme
 

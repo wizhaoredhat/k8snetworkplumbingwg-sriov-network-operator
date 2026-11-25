@@ -145,6 +145,46 @@ func isPodReady(pod *corev1.Pod) bool {
 	return false
 }
 
+// waitForDRAProviderSwitch performs the user-managed checks required before
+// creating policies after a feature-gate change, including during suite cleanup.
+func waitForDRAProviderSwitch(ctx context.Context, draEnabled bool) {
+	selected, previous := devicePluginDSName, consts.DRADriverDaemonSetName
+	if draEnabled {
+		selected, previous = previous, selected
+	}
+	By(fmt.Sprintf("Waiting for %s removal and %s rollout before creating policies", previous, selected))
+	Eventually(ctx, func(g Gomega) {
+		err := clients.Get(ctx, runtimeclient.ObjectKey{Namespace: operatorNamespace, Name: previous}, &appsv1.DaemonSet{})
+		g.Expect(errors.IsNotFound(err)).To(BeTrue(), "previous provider DaemonSet still exists: %v", err)
+		oldPods, err := clients.Pods(operatorNamespace).List(ctx, metav1.ListOptions{LabelSelector: "app=" + previous})
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(oldPods.Items).To(BeEmpty())
+
+		ds := &appsv1.DaemonSet{}
+		g.Expect(clients.Get(ctx, runtimeclient.ObjectKey{Namespace: operatorNamespace, Name: selected}, ds)).To(Succeed())
+		g.Expect(ds.DeletionTimestamp.IsZero()).To(BeTrue())
+		g.Expect(ds.Status.ObservedGeneration).To(BeNumerically(">=", ds.Generation))
+		g.Expect(ds.Status.UpdatedNumberScheduled).To(Equal(ds.Status.DesiredNumberScheduled))
+		g.Expect(ds.Status.NumberAvailable).To(Equal(ds.Status.DesiredNumberScheduled))
+		g.Expect(ds.Status.NumberReady).To(Equal(ds.Status.DesiredNumberScheduled))
+		// The device plugin may have no eligible nodes until policies exist.
+		if draEnabled {
+			g.Expect(ds.Status.DesiredNumberScheduled).To(BeNumerically(">", 0))
+		}
+		pods, err := clients.Pods(operatorNamespace).List(ctx, metav1.ListOptions{LabelSelector: "app=" + selected})
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(pods.Items).To(HaveLen(int(ds.Status.DesiredNumberScheduled)))
+		for _, p := range pods.Items {
+			g.Expect(p.DeletionTimestamp.IsZero()).To(BeTrue())
+			g.Expect(p.Status.Phase).To(Equal(corev1.PodRunning))
+			g.Expect(isPodReady(&p)).To(BeTrue(), "provider pod %s is not Ready", p.Name)
+			if draEnabled {
+				g.Expect(draDriverInitContainersTerminated(&p)).To(BeTrue(), "DRA pod %s is still in Init", p.Name)
+			}
+		}
+	}).WithTimeout(waitingTime).WithPolling(5 * time.Second).Should(Succeed())
+}
+
 // testDRAVFIOExtendedResource runs after the advertisement tests, before the
 // ordered suite removes the policy and switches back to the device plugin.
 func testDRAVFIOExtendedResource(ctx SpecContext, policyName string) {
@@ -303,7 +343,7 @@ var _ = Describe("[sriov] DRA", Ordered, func() {
 		WaitForSRIOVStable()
 
 		featureFlagInitialValue := isFeatureFlagEnabled(consts.DynamicResourceAllocationFeatureGate)
-		DeferCleanup(func() {
+		DeferCleanup(func(ctx SpecContext) {
 			By("Restoring dynamicResourceAllocation feature flag and cleaning test state")
 			// Switching providers in either direction requires removing policies first.
 			if err := namespaces.CleanPods(namespaces.Test, clients); err != nil {
@@ -327,8 +367,10 @@ var _ = Describe("[sriov] DRA", Ordered, func() {
 						"test policy %q has not been removed", policy.Name)
 				}
 			}).WithTimeout(waitingTime).WithPolling(time.Second).Should(Succeed())
+			WaitForSRIOVStable()
 			setFeatureFlag(consts.DynamicResourceAllocationFeatureGate, featureFlagInitialValue)
 			WaitForSRIOVStable()
+			waitForDRAProviderSwitch(ctx, featureFlagInitialValue)
 		})
 
 		sriovInfos, err := cluster.DiscoverSriov(clients, operatorNamespace)
@@ -364,34 +406,7 @@ var _ = Describe("[sriov] DRA", Ordered, func() {
 	})
 
 	It("should deploy the DRA driver DaemonSet and remove the device plugin", func(ctx SpecContext) {
-		By("Waiting for sriov-dra-driver DaemonSet to exist")
-		Eventually(ctx, func(g Gomega) {
-			ds := &appsv1.DaemonSet{}
-			err := clients.Get(ctx, runtimeclient.ObjectKey{
-				Namespace: operatorNamespace,
-				Name:      consts.DRADriverDaemonSetName,
-			}, ds)
-			g.Expect(err).ToNot(HaveOccurred())
-			g.Expect(ds.Status.DesiredNumberScheduled).To(BeNumerically(">", 0))
-		}).WithTimeout(waitingTime).WithPolling(5 * time.Second).Should(Succeed())
-
-		By("Waiting for DRA driver pods to become Ready")
-		Eventually(ctx, func(g Gomega) {
-			pods, err := clients.Pods(operatorNamespace).List(ctx, metav1.ListOptions{
-				LabelSelector: draDriverAppLabel,
-			})
-			g.Expect(err).ToNot(HaveOccurred())
-			g.Expect(pods.Items).ToNot(BeEmpty())
-			for _, p := range pods.Items {
-				g.Expect(draDriverInitContainersTerminated(&p)).To(BeTrue(),
-					"DRA driver pod %s still in Init: %v", p.Name, p.Status.InitContainerStatuses)
-				g.Expect(p.Status.Phase).To(Equal(corev1.PodRunning))
-				g.Expect(isPodReady(&p)).To(BeTrue(), "DRA driver pod %s is not Ready", p.Name)
-			}
-		}).WithTimeout(waitingTime).WithPolling(5 * time.Second).Should(Succeed())
-
-		By("Waiting for sriov-device-plugin DaemonSet to be removed")
-		assertObjectIsNotFound(devicePluginDSName, &appsv1.DaemonSet{})
+		waitForDRAProviderSwitch(ctx, true)
 	})
 
 	It("should create the base DeviceClass managed by the operator", func(ctx SpecContext) {
@@ -698,6 +713,8 @@ var _ = Describe("[sriov] DRA", Ordered, func() {
 			}, dc)
 			g.Expect(errors.IsNotFound(err) || meta.IsNoMatchError(err)).To(BeTrue())
 		}).WithTimeout(2 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
+
+		waitForDRAProviderSwitch(ctx, false)
 
 		By("Recreating the policy in device-plugin mode")
 		_, err := network.CreateSriovPolicy(clients, "test-device-plugin-policy-", operatorNamespace, nic.Name, node, initialVFs, draResourceName, "netdevice")
